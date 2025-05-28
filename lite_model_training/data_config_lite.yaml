@@ -1,0 +1,10 @@
+tokenizer_path: "data/tokenizer_config.json" # Can reuse the main tokenizer
+train_data_path: "lite_model_training/tokenized_lite/train_data_lite.pt"
+val_data_path: "lite_model_training/tokenized_lite/val_data_lite.pt"
+checkpoint_dir: "lite_model_training/checkpoints_lite/"
+
+# --- Data subsetting/curation parameters (used by a new script) ---
+# This section is conceptual for a script that would prepare the lite dataset.
+# max_songs_for_lite: 50 # For example, use only 50 songs for the lite dataset
+# processed_data_source_dir: "data/processed/" # Where to find full processed data
+# lite_processed_data_target_dir: "lite_model_training/processed_lite/"

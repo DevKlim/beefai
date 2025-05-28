@@ -1,0 +1,139 @@
+<html lang="en">
+
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>beefai - AI Rap Battle Arena</title>
+    <link rel="stylesheet" href="static/css/style.css">
+    <link
+        href="https://fonts.googleapis.com/css2?family=Montserrat:wght@400;700;900&family=Roboto+Mono:wght@400;500&display=swap"
+        rel="stylesheet">
+    <!-- <link rel="icon" href="static/img/favicon.ico" type="image/x-icon"> -->
+</head>
+
+<body>
+    <div class="container">
+        <header>
+            <div class="logo">
+                <h1>BEEF<span>AI</span></h1>
+                <p>THE AI RAP BATTLE ARENA</p>
+            </div>
+        </header>
+
+        <main>
+            <section id="beat-engine-section" class="card">
+                <div class="card-header">
+                    <span class="step-number">1</span>
+                    <h2>BEAT ENGINE</h2>
+                </div>
+                <div class="input-group">
+                    <label for="beat-file-upload" class="file-upload-label">
+                        <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="currentColor" width="18"
+                            height="18">
+                            <path d="M9 16h6v-6h4l-7-7-7 7h4zm-4 2h14v2H5z" />
+                        </svg>
+                        LOAD INSTRUMENTAL (MP3/WAV)
+                    </label>
+                    <input type="file" id="beat-file-upload" name="beat-file-upload" accept=".mp3,.wav">
+                </div>
+                <div id="beat-player-interface" style="display: none;">
+                    <audio id="beat-audio-player" loop></audio>
+                    <div id="beat-info-display" class="info-display small-info">
+                        <p>No beat loaded.</p>
+                    </div>
+                    <div class="player-controls">
+                        <button id="play-pause-beat-btn" class="icon-btn player-btn">
+                            <svg class="play-icon" xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"
+                                fill="currentColor">
+                                <path d="M8 5v14l11-7z" />
+                            </svg>
+                            <svg class="pause-icon" style="display:none;" xmlns="http://www.w3.org/2000/svg"
+                                viewBox="0 0 24 24" fill="currentColor">
+                                <path d="M6 19h4V5H6v14zm8-14v14h4V5h-4z" />
+                            </svg>
+                        </button>
+                        <div class="volume-control">
+                            <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="currentColor" width="20"
+                                height="20">
+                                <path
+                                    d="M3 9v6h4l5 5V4L7 9H3zm13.5 3c0-1.77-1.02-3.29-2.5-4.03v8.05c1.48-.73 2.5-2.25 2.5-4.02zM14 3.23v2.06c2.89.86 5 3.54 5 6.71s-2.11 5.85-5 6.71v2.06c4.01-.91 7-4.49 7-8.77s-2.99-7.86-7-8.77z" />
+                            </svg>
+                            <input type="range" id="beat-volume-slider" min="0" max="1" step="0.01" value="0.7">
+                        </div>
+                    </div>
+                    <!-- Placeholder for Live Beat/Syllable Counter -->
+                    <div id="live-feedback-display" class="info-display small-info" style="margin-top: 10px;">
+                        <p><strong>Live Sync:</strong> <span id="current-beat-display">-</span> | <span
+                                id="current-bar-display">-</span> | <span id="syllable-count-display">-</span></p>
+                    </div>
+                </div>
+            </section>
+
+            <section id="user-booth-section" class="card">
+                <div class="card-header">
+                    <span class="step-number">2</span>
+                    <h2>YOUR BOOTH</h2>
+                </div>
+                <div class="record-area">
+                    <button id="record-mic-btn" class="icon-btn record-btn" disabled>
+                        <svg class="mic-icon" xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"
+                            fill="currentColor">
+                            <path
+                                d="M12 14c1.66 0 3-1.34 3-3V5c0-1.66-1.34-3-3-3S9 3.34 9 5v6c0 1.66 1.34 3 3 3zm5.91-3c-.49 0-.9.36-.98.85C16.52 14.2 14.47 16 12 16s-4.52-1.8-4.93-4.15c-.08-.49-.49-.85-.98-.85-.61 0-1.09.54-1 1.14.18 3.02 2.52 5.47 5.41 5.81V21h-2c-.55 0-1 .45-1 1s.45 1 1 1h6c.55 0 1-.45 1-1s-.45-1-1-1h-2v-3.05c2.89-.34 5.23-2.79 5.41-5.81.01-.6-.39-1.14-1-1.14z" />
+                        </svg>
+                        <svg class="stop-icon" style="display:none;" xmlns="http://www.w3.org/2000/svg"
+                            viewBox="0 0 24 24" fill="currentColor">
+                            <path d="M6 6h12v12H6z" />
+                        </svg>
+                        <span class="btn-text">RECORD DISS</span>
+                    </button>
+                    <div id="mic-status" class="info-display small-info" style="display: none;">
+                        <p>🎤 RECORDING</p>
+                        <div id="mic-visualizer-container">
+                            <div id="mic-visualizer-bar"></div>
+                        </div>
+                    </div>
+                </div>
+                <div id="user-rap-display" class="rap-display" style="display:none;">
+                    <h4>YOUR LYRICS (SIMULATED ASR):</h4>
+                    <pre id="user-lyrics-text"></pre>
+                </div>
+            </section>
+
+            <section id="ai-battle-section" class="card">
+                <div class="card-header">
+                    <span class="step-number">3</span>
+                    <h2>AI RESPONSE</h2>
+                </div>
+                <div id="ai-status-container">
+                    <div id="ai-idle-message" class="info-display">
+                        <p>BEEF<span>AI</span> IS LISTENING...</p>
+                    </div>
+                    <div id="ai-loading" class="loading-animation" style="display: none;">
+                        <div class="spinner"></div>
+                        <p>BEEF<span>AI</span> IS COOKIN' UP A STORM...</p>
+                    </div>
+                    <div id="ai-response-content" style="display:none;">
+                        <div id="ai-lyrics-display" class="rap-display">
+                            <h4>BEEF<span>AI</span>'S COMEBACK:</h4>
+                            <pre id="ai-lyrics-content"></pre>
+                        </div>
+                        <div id="ai-audio-player-container">
+                            <!-- AI audio will be played programmatically, controls might not be needed -->
+                            <audio id="ai-audio-player"></audio>
+                            <p id="ai-playback-status" class="small-info"></p>
+                        </div>
+                    </div>
+                </div>
+            </section>
+        </main>
+
+        <footer>
+            <p>&copy; 2024 BEEF<span>AI</span> DEMO. ALL SYSTEMS GO.</p>
+        </footer>
+    </div>
+
+    <script src="static/js/main.js"></script>
+</body>
+
+</html>

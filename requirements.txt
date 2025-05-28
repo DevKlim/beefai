@@ -1,0 +1,43 @@
+# Python 3.11 is recommended.
+
+# PyTorch with CUDA 12.1 (Example - adjust to your system or use CPU version)
+# For CPU-only PyTorch, remove the --extra-index-url and specify torch cpu versions
+# or let pip resolve. For specific CUDA, this index is helpful.
+# Ensure your PyTorch version matches your system's CUDA capabilities if using GPU.
+# If no GPU or unsure, you can install the CPU version:
+# torch torchvision torchaudio --index-url https://download.pytorch.org/whl/cpu
+--extra-index-url https://download.pytorch.org/whl/cu121
+torch>=2.0.0
+torchvision>=0.15.0
+torchaudio>=2.0.0
+
+# Core audio and numerical processing
+librosa==0.10.1
+numpy==1.26.3
+soundfile==0.12.1
+
+# NLP and Lyric Generation (transformers for LyricAgent)
+transformers>=4.36.2
+sentencepiece>=0.1.99 # Often needed by transformers tokenizers
+
+# Text processing (for TextProcessor)
+pyphen==0.14.0
+nltk==3.8.1 # Ensure 'punkt' and 'cmudict' are downloaded if TextProcessor uses them
+
+# Data processing pipeline for flow model
+praat-textgrids>=1.3.1 # For reading MFA TextGrid outputs
+tqdm>=4.60.0 # For progress bars in scripts
+
+# Optional: For actual source separation (if replacing placeholder)
+# demucs>=4.0.0 # Example, install if you plan to integrate Demucs
+
+# Optional: For advanced Text-to-Speech/Singing Voice Synthesis (Coqui TTS)
+# If you enable this in beefai/synthesis/synthesizer.py, uncomment and install.
+# This is a large dependency and might have platform-specific build requirements.
+# TTS==0.22.0
+
+# --- New dependencies for the YouTube downloader script ---
+yt-dlp>=2023.12.30
+requests>=2.31.0
+beautifulsoup4>=4.12.3
+duckduckgo-search>=4.0.0 # For searching lyric pages
