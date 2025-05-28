@@ -1,5 +1,9 @@
 .venv
 153 _ 253 2025 Assignment 2.pdf
 
-my_music_collection
-.mp3
+downloaded_songs
+*.mp3
+.env
+data/*
+arpa/english_us_arpa.zip
+arpa/english_us_arpa.dict
