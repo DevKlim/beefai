@@ -1,0 +1,84 @@
+###############################################################################
+# DATASET TITLE   : <Beef AI>
+# DESCRIPTION     : Direct links to rap-only audio clips for classification.
+# CREATED BY      : beefai
+# DATE CREATED    : 2025-05-28
+# SOURCE LICENSE  : <e.g. “Creative Commons BY 4.0” or “Research-only”>
+# NOTES           : – 3-space separated columns
+#                   – All times are seconds
+###############################################################################
+# id   title   artist   url   duration_sec   label
+# --   -----   ------   ---   ------------   -----
+001   Superrappin'   Grandmaster Flash   https://www.youtube.com/watch?v=Up8zxybJNHQ   723   oldschool
+002   Super Rappin' No.2   Grandmaster Flash   https://www.youtube.com/watch?v=Gir6TR7Eaxo   7437   oldschool
+003   Rappin Blow (Part 2)   Kurtis Blow   https://www.youtube.com/watch?v=tdE5fZFWhb0   283   oldschool
+004   The Breaks   Kurtis Blow   https://www.youtube.com/watch?v=ulBhSNEkMrM   464   oldschool
+005   Hard Times   Kurtis Blow   https://www.youtube.com/watch?v=PCmP0eBuAho   276   oldschool
+006   Christmas Rappin'   Kurtis Blow   https://www.youtube.com/watch?v=9xUFnGWWtoQ   237   oldschool
+007   The Bronx   Kurtis Blow   https://www.youtube.com/watch?v=F3KjLJcKCLM   230   oldschool
+008   Sunshine   Kurtis Blow   https://www.youtube.com/watch?v=Fxe_jjx9nkw   251   oldschool
+009   I'm Chillin'   Kurtis Blow   https://www.youtube.com/watch?v=MegK4YXKWzw   327   oldschool
+010   Kingdom Blow   Kurtis Blow   https://www.youtube.com/watch?v=Bi0xHTtXYog   245   oldschool
+011   Back By Popular Demand   Kurtis Blow   https://www.youtube.com/watch?v=drs8NUwWU7I   325   oldschool
+012   I'm True To This   Kurtis Blow   https://www.youtube.com/watch?v=WR8a0gdoAvw   205   oldschool
+013   Get On Up   Kurtis Blow   https://www.youtube.com/watch?v=iUgE7DpajSM   143   oldschool
+014   Suckers In The Place   Kurtis Blow   https://www.youtube.com/watch?v=qFuQJlwmYds   281   oldschool
+015   Still On The Scene   Kurtis Blow   https://www.youtube.com/watch?v=iq42L2lDg8E   272   oldschool
+016   I'm Tired   Kurtis Blow; Trinity; Gospel Gangstaz   https://www.youtube.com/watch?v=a8ycurugZDo   245   christian_rap
+017   Crunk Wit It   Kurtis Blow; Trinity; Blue Chip   https://www.youtube.com/watch?v=Kw1PG2uLcM4   265   christian_rap
+018   Halftime   Nas   https://www.youtube.com/watch?v=HCDYgZM5yq0   260   boombap
+019   N.Y. State of Mind   Nas   https://www.youtube.com/watch?v=hI8A14Qcv68   293   boombap
+020   Life's a Bitch   Nas; AZ; Olu Dara   https://www.youtube.com/watch?v=AxKleuLBRcw   210   boombap
+021   The World Is Yours   Nas   https://www.youtube.com/watch?v=e5PnuIRnJW8   290   boombap
+022   Memory Lane (Sittin' in da Park)   Nas   https://www.youtube.com/watch?v=ImSoA_fAVL4   248   boombap
+023   One Love   Nas; Q-Tip   https://www.youtube.com/watch?v=kdEQeb8uwX4   325   boombap
+024   One Time 4 Your Mind   Nas   https://www.youtube.com/watch?v=xiSRg0I4_-0   198   boombap
+025   Represent   Nas   https://www.youtube.com/watch?v=DHkOgqbC9zY   252   boombap
+026   Street Dreams   Nas   https://www.youtube.com/watch?v=tbYH_Lo_HK8   281   boombap
+027   I Gave You Power   Nas   https://www.youtube.com/watch?v=W3CtiDIZGXg   236   boombap
+028   Take It In Blood   Nas   https://www.youtube.com/watch?v=83FM4Y9OF9w   289   boombap
+029   The Set Up   Nas; Havoc   https://www.youtube.com/watch?v=PmFl_n_tjHY   266   boombap
+030   N.Y. State of Mind, Pt. II   Nas   https://www.youtube.com/watch?v=Lyy42ec8BaE   216   boombap
+031   Small World   Nas   https://www.youtube.com/watch?v=Jv7Szeknq1Y   285   boombap
+032   I Want to Talk to You   Nas   https://www.youtube.com/watch?v=bgCwvrDG8YM   276   boombap
+033   Dr. Knockboot   Nas   https://www.youtube.com/watch?v=ysSg_Iymv6E   145   boombap
+034   Life Is What You Make It   Nas; DMX   https://www.youtube.com/watch?v=XbGzUY3o_Ec   244   boombap
+035   Big Things   Nas   https://www.youtube.com/watch?v=BdF4U3TlQaU   219   boombap
+036   Nas Is Like   Nas   https://www.youtube.com/watch?v=M5i05jKE38o   237   boombap
+037   Money Is My Bitch   Nas   https://www.youtube.com/watch?v=7Mg_qjqcXuk   242   boombap
+038   Push It Along   A Tribe Called Quest   https://www.youtube.com/watch?v=idce_a_HckE   462   boombap
+039   Luck of Lucien   A Tribe Called Quest   https://www.youtube.com/watch?v=WPOHTcRSH_Q   272   boombap
+040   Footprints   A Tribe Called Quest   https://www.youtube.com/watch?v=nrzom_4Xaxo   240   boombap
+041   I Left My Wallet in El Segundo   A Tribe Called Quest   https://www.youtube.com/watch?v=WILyWmT2A-Q   246   boombap
+042   Pubic Enemy   A Tribe Called Quest   https://www.youtube.com/watch?v=M2fqWjKlPpo   225   boombap
+043   Can I Kick It?   A Tribe Called Quest   https://www.youtube.com/watch?v=O3pyCGnZzYA   251   boombap
+044   Mr. Muhammad   A Tribe Called Quest   https://www.youtube.com/watch?v=GG8cVjZK9vA   213   boombap
+045   Ham 'N' Eggs   A Tribe Called Quest   https://www.youtube.com/watch?v=AqrwROSSvFU   327   boombap
+046   Go Ahead In the Rain   A Tribe Called Quest   https://www.youtube.com/watch?v=GCHGneL5bpI   234   boombap
+047   Description of a Fool   A Tribe Called Quest   https://www.youtube.com/watch?v=zvh3B_MTbGo   341   boombap
+048   Mr. Scarface   Scarface   https://www.youtube.com/watch?v=6sZGndKspgw   352   gangsta_rap
+049   The Pimp   Scarface   https://www.youtube.com/watch?v=UNI0HsWcJF0   188   gangsta_rap
+050   Born Killer   Scarface   https://www.youtube.com/watch?v=GbEUR7AjxpA   218   gangsta_rap
+051   Murder By Reason Of Insanity   Scarface   https://www.youtube.com/watch?v=sQXjoRL7Tuc   227   gangsta_rap
+052   Your Ass Got Took   Scarface   https://www.youtube.com/watch?v=AI-8mKmnupw   224   gangsta_rap
+053   Diary Of A Madman   Scarface   https://www.youtube.com/watch?v=gbCEsuIVFfM   184   gangsta_rap
+054   Body Snatchers   Scarface   https://www.youtube.com/watch?v=94W6uy-4ycs   192   gangsta_rap
+055   Money And The Power   Scarface   https://www.youtube.com/watch?v=z1naWK2BEas   229   gangsta_rap
+056   P D Roll 'Em   Scarface   https://www.youtube.com/watch?v=6XeZkSyap74   227   gangsta_rap
+057   Good Girl Gone Bad   Scarface   https://www.youtube.com/watch?v=7rp_6YI8XE0   257   gangsta_rap
+058   A Minute To Pray And A Second To Die   Scarface   https://www.youtube.com/watch?v=LO3qM3rhTrE   284   gangsta_rap
+059   I'm Dead   Scarface   https://www.youtube.com/watch?v=CtN61yWle8s   147   gangsta_rap
+060   6 'N the Mornin'   Ice-T   https://www.youtube.com/watch?v=pzCGPlDgbgU   436   gangsta_rap
+061   Make It Funky   Ice-T   https://www.youtube.com/watch?v=kqNEz2bk-Nc   310   gangsta_rap
+062   Somebody Gotta Do It (Pimpin' Ain't Easy!!!)   Ice-T   https://www.youtube.com/watch?v=JS4rFqaQM0s   184   gangsta_rap
+063   I Love Ladies   Ice-T   https://www.youtube.com/watch?v=aLDM7gOLHio   285   gangsta_rap
+064   Pain   Ice-T   https://www.youtube.com/watch?v=NskI4Y1nPuM   216   gangsta_rap
+065   Squeeze the Trigger   Ice-T   https://www.youtube.com/watch?v=fir13LD18jk   374   gangsta_rap
+066   The Watcher   Dr. Dre; Eminem; Knoc-Turn'al   https://www.youtube.com/watch?v=erJQha5ur_U   206   gfunk
+067   Fuck You   Dr. Dre; Devin The Dude; Snoop Dogg   https://www.youtube.com/watch?v=7EqnoEljHCw   205   gfunk
+068   Still D.R.E.   Dr. Dre; Snoop Dogg   https://www.youtube.com/watch?v=_CL6n0FJZpk   270   gfunk
+069   Big Ego's   Dr. Dre; Hittman   https://www.youtube.com/watch?v=XomLB_qIIDo   238   gfunk
+070   What's The Difference   Dr. Dre; Eminem; Xzibit   https://www.youtube.com/watch?v=-Ubyt7iWJ8Q   244   gfunk
+071   Light Speed   Dr. Dre; Hittman   https://www.youtube.com/watch?v=0FRpIaXM330   161   gfunk
+072   Forgot About Dre   Dr. Dre; Eminem   https://www.youtube.com/watch?v=QFcv5Ma8u8k   253   gfunk
+073   The Next Episode   Dr. Dre; Snoop Dogg   https://www.youtube.com/watch?v=QZXc39hT8t4   161   gfunk
