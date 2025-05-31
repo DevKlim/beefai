@@ -1,341 +1,272 @@
-import os
-import shutil
 import subprocess
-import argparse
-import glob
-from tqdm import tqdm
+import os
 import sys
+import argparse
 
-PYTHON_EXECUTABLE = sys.executable
+# Ensure the beefai module can be found if scripts are run from project root
+sys.path.append(os.getcwd())
 
-def ensure_dir(directory_path: str):
-    os.makedirs(directory_path, exist_ok=True)
+# Default paths (can be overridden by command-line arguments)
+# These should ideally align with defaults in preprocess_dataset.py and 05a/b_tokenize_data.py
+DEFAULT_RAW_SONGS_DIR = "data/raw_songs_full/"
+DEFAULT_LYRICS_DIR = "data/lyrics/"
+DEFAULT_INSTRUMENTALS_DIR = "data/instrumentals/"
+DEFAULT_ACAPELLAS_DIR = "data/acapellas/"
+DEFAULT_ALIGNMENTS_JSON_DIR = "data/alignments_json/"
+DEFAULT_PREPROCESSED_OUTPUT_DIR = "data/processed_for_transformer/" # For preprocess_dataset.py output
+DEFAULT_TOKENIZED_LITE_DIR = "data/tokenized_lite/" # For 05a_tokenize_data_lite.py output
+DEFAULT_TOKENIZED_FULL_DIR = "data/tokenized_full/" # For 05b_tokenize_data_full.py output
 
-def run_command(command_list: list, cwd: str = None, step_name: str = ""):
-    print(f"\n--- Running {step_name if step_name else 'command'}: {' '.join(command_list)} ---")
+# Stem separation related defaults
+DEFAULT_STEM_OUTPUT_BASE_DIR = "data/temp_demucs_separated" # Example, Demucs might put it here
+DEFAULT_DEMUCS_MODEL = "htdemucs_ft" # Common high-quality Demucs model
+
+
+def run_command(command_list, step_name):
+    """Helper function to run an external command and handle errors."""
+    print(f"\n--- Running Step: {step_name} ---")
+    print(f"Executing: {' '.join(command_list)}")
     try:
-        process = subprocess.Popen(command_list, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, bufsize=1, universal_newlines=True, cwd=cwd)
-        for line in process.stdout:
-            print(line, end='')
-        process.wait()
+        # Capture output for better logging
+        process = subprocess.Popen(command_list, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+        stdout, stderr = process.communicate()
+        
+        if stdout: print(f"Stdout from {step_name}:\n{stdout}")
+        if stderr: print(f"Stderr from {step_name}:\n{stderr}")
+
         if process.returncode != 0:
-            print(f"Error: {step_name if step_name else 'Command'} failed with return code {process.returncode}")
+            print(f"ERROR: {step_name} failed with exit code {process.returncode}.")
+            print(f"--- {step_name} failed. Halting pipeline. ---")
             return False
-        print(f"--- {step_name if step_name else 'Command'} completed successfully ---")
+        print(f"--- {step_name} completed successfully. ---")
         return True
     except FileNotFoundError:
-        print(f"Error: Command not found for '{step_name}'. Is '{command_list[0]}' in your PATH or is it the correct path?")
-        print(f"Attempted to run: {' '.join(command_list)}")
+        print(f"ERROR: Command '{command_list[0]}' not found for step '{step_name}'. Ensure it's installed and in PATH.")
         return False
     except Exception as e:
-        print(f"Exception during {step_name if step_name else 'command'}: {e}")
+        print(f"ERROR: An unexpected error occurred during '{step_name}': {e}")
         return False
 
-def convert_mp3_to_wav(mp3_path: str, wav_path: str) -> bool:
-    if not shutil.which("ffmpeg"):
-        print("Error: ffmpeg not found in PATH. Cannot convert MP3 to WAV for MFA.")
+
+def run_python_script(script_path_relative_to_scripts_dir, script_name, script_args=None):
+    """Helper function to run a Python script from the 'scripts' directory."""
+    full_script_path = os.path.join("scripts", script_path_relative_to_scripts_dir)
+    if not os.path.exists(full_script_path):
+        print(f"ERROR: Script {full_script_path} not found. Skipping.")
         return False
-    command = ["ffmpeg", "-i", mp3_path, "-acodec", "pcm_s16le", "-ac", "1", "-ar", "44100", wav_path, "-y", "-hide_banner", "-loglevel", "error"]
-    return run_command(command, step_name=f"ffmpeg conversion for {os.path.basename(mp3_path)}")
+    
+    command = [sys.executable, full_script_path]
+    if script_args:
+        command.extend(script_args)
+    
+    return run_command(command, script_name)
+
 
 def main(args):
-    base_dataset_dir = args.dataset_dir
-    
-    raw_songs_full_dir = os.path.join(base_dataset_dir, "raw_songs_full")
-    instrumentals_dir = os.path.join(base_dataset_dir, "instrumentals")
-    acapellas_dir = os.path.join(base_dataset_dir, "acapellas")
-    lyrics_dir = os.path.join(base_dataset_dir, "lyrics") 
-    
-    # For audio-separator, output is directly to final acapellas/instrumentals
-    # For Demucs, we use a temp directory
-    temp_demucs_separated_dir = os.path.join(base_dataset_dir, "temp_demucs_separated") 
-    
-    mfa_input_corpus_dir = os.path.join(base_dataset_dir, "temp_mfa_input_corpus") 
-    alignments_textgrid_dir = os.path.join(base_dataset_dir, "alignments_textgrid")
-    
-    processed_transformer_dir = os.path.join(base_dataset_dir, "processed_for_transformer")
-    final_tokenized_output_file = os.path.join(processed_transformer_dir, "tokenized_flow_dataset.pt")
-    tokenizer_config_path = os.path.join(os.getcwd(), "beefai", "flow_model", "flow_tokenizer_config_v2.json")
+    print("====== Starting Full Data Preparation Pipeline ======")
 
-    ensure_dir(instrumentals_dir)
-    ensure_dir(acapellas_dir)
-    if args.separator_tool == "demucs":
-        ensure_dir(temp_demucs_separated_dir)
-    ensure_dir(mfa_input_corpus_dir)
-    ensure_dir(alignments_textgrid_dir)
-    ensure_dir(processed_transformer_dir)
+    # --- Phase 0: Setup ---
+    print("\nPHASE 0: Setup")
+    print("Please ensure you have run 'setup.sh' (Linux/macOS) or 'setup.bat' (Windows)")
+    print("to create the virtual environment and install dependencies (PyTorch, whisper-timestamped, etc.).")
+    print("Also ensure FFmpeg is installed and in your system's PATH.")
+    if not args.skip_setup_prompt:
+        input("Press Enter to continue if setup is complete...")
 
-    song_basenames = sorted([os.path.splitext(f)[0] for f in os.listdir(raw_songs_full_dir) if f.lower().endswith(('.mp3', '.wav', '.flac'))])
-    if not song_basenames:
-        print(f"No audio files found in {raw_songs_full_dir}. Exiting.")
+    # --- Phase 1: Data Acquisition & Initial Organization ---
+    if not args.skip_data_acquisition:
+        print("\nPHASE 1: Data Acquisition & Organization")
+        print("This phase includes downloading songs/lyrics and basic organization.")
+        print(f"Ensure '{args.raw_songs_dir}' and '{args.lyrics_dir}' are populated, or run acquisition scripts.")
+        # run_python_script("download_youtube_lyrics.py", "Download YouTube Lyrics") # Optional
+        # run_python_script("organize_downloaded_songs.py", "Organize Downloaded Songs") # Optional
+        # run_python_script("remove_first_line_from_lyrics.py", "Clean Lyric Files") # Optional
+    else:
+        print("\nSkipping PHASE 1: Data Acquisition & Organization")
+
+
+    # --- Phase 1b: Source Separation (Example using Demucs) ---
+    if not args.skip_source_separation:
+        print("\nPHASE 1b: Source Separation (Example: Demucs)")
+        print("This step separates raw songs into instrumentals and acapellas.")
+        print(f"Raw songs are expected in: {args.raw_songs_dir}")
+        print(f"Separated stems (and subsequently instrumentals/acapellas) will be processed based on Demucs output.")
+        print(f"Instrumentals will be moved to: {args.instrumentals_dir}")
+        print(f"Acapellas will be moved to: {args.acapellas_dir}")
+        
+        os.makedirs(args.instrumentals_dir, exist_ok=True)
+        os.makedirs(args.acapellas_dir, exist_ok=True)
+        
+        # Determine the Demucs output directory structure
+        # Demucs typically outputs to: base_output_dir / demucs_model_name / song_name_no_ext / {vocals.wav, no_vocals.wav}
+        demucs_output_for_model = os.path.join(args.stem_output_base_dir, args.demucs_model)
+        os.makedirs(demucs_output_for_model, exist_ok=True)
+
+        raw_song_files = [f for f in os.listdir(args.raw_songs_dir) if os.path.isfile(os.path.join(args.raw_songs_dir, f)) and f.lower().endswith(('.mp3', '.wav', '.flac'))]
+        if not raw_song_files:
+            print(f"No raw songs found in {args.raw_songs_dir} to separate. Skipping Demucs.")
+        else:
+            for song_file in raw_song_files:
+                song_path = os.path.join(args.raw_songs_dir, song_file)
+                song_name_no_ext = os.path.splitext(song_file)[0]
+                
+                # Define expected output paths from Demucs
+                expected_demucs_song_dir = os.path.join(demucs_output_for_model, song_name_no_ext)
+                expected_vocals_path = os.path.join(expected_demucs_song_dir, "vocals.wav")
+                expected_no_vocals_path = os.path.join(expected_demucs_song_dir, "no_vocals.wav")
+
+                # Define final destination paths
+                final_acapella_path = os.path.join(args.acapellas_dir, f"{song_name_no_ext}.wav") # Assuming wav for consistency
+                final_instrumental_path = os.path.join(args.instrumentals_dir, f"{song_name_no_ext}.wav")
+
+                if os.path.exists(final_acapella_path) and os.path.exists(final_instrumental_path) and not args.force_rerun_separation:
+                    print(f"Stems for {song_file} already exist at final destinations. Skipping separation.")
+                    continue
+
+                # Run Demucs for this song
+                # Output directly to the model-specific subdirectory
+                demucs_cmd = [
+                    sys.executable, "-m", "demucs",
+                    "--two-stems=vocals", # Get vocals and accompaniment
+                    "-o", args.stem_output_base_dir, # Demucs will create args.demucs_model subdir here
+                    "-n", args.demucs_model,
+                    song_path
+                ]
+                if not run_command(demucs_cmd, f"Demucs Separation for {song_file}"):
+                    print(f"Demucs failed for {song_file}. Pipeline cannot continue robustly for this song.")
+                    continue # Skip to next song or implement stricter error handling
+
+                # Move/rename Demucs outputs
+                if os.path.exists(expected_vocals_path) and os.path.exists(expected_no_vocals_path):
+                    print(f"Moving separated stems for {song_name_no_ext}...")
+                    try:
+                        os.rename(expected_vocals_path, final_acapella_path)
+                        os.rename(expected_no_vocals_path, final_instrumental_path)
+                        print(f"  Moved vocals to: {final_acapella_path}")
+                        print(f"  Moved instrumental to: {final_instrumental_path}")
+                        # Optionally remove the (now empty) expected_demucs_song_dir if desired
+                        # And potentially the demucs_output_for_model if it's the last song, though safer to leave
+                    except Exception as e:
+                        print(f"  Error moving stems for {song_name_no_ext}: {e}")
+                else:
+                    print(f"  ERROR: Demucs output not found at expected paths for {song_name_no_ext}:")
+                    print(f"    Expected vocals: {expected_vocals_path}")
+                    print(f"    Expected no_vocals: {expected_no_vocals_path}")
+                    print(f"  Please check Demucs execution and output structure.")
+    else:
+        print("\nSkipping PHASE 1b: Source Separation")
+        print(f"Ensure '{args.instrumentals_dir}' and '{args.acapellas_dir}' are populated.")
+
+
+    # --- Phase 1c: Forced Alignment (whisper-timestamped) ---
+    if not args.skip_forced_alignment:
+        print("\nPHASE 1c: Forced Alignment (whisper-timestamped)")
+        print(f"Aligning acapellas from: {args.acapellas_dir}")
+        print(f"JSON alignments will be saved to: {args.alignments_json_dir}")
+        os.makedirs(args.alignments_json_dir, exist_ok=True)
+
+        acapella_files = [f for f in os.listdir(args.acapellas_dir) if os.path.isfile(os.path.join(args.acapellas_dir, f))]
+        if not acapella_files:
+            print(f"No acapellas found in {args.acapellas_dir} to align. Skipping alignment.")
+        else:
+            for acapella_file in acapella_files:
+                acapella_path = os.path.join(args.acapellas_dir, acapella_file)
+                song_name_no_ext = os.path.splitext(acapella_file)[0]
+                output_json_path = os.path.join(args.alignments_json_dir, f"{song_name_no_ext}.json")
+
+                if os.path.exists(output_json_path) and not args.force_rerun_alignment:
+                    print(f"Alignment for {acapella_file} already exists. Skipping.")
+                    continue
+                
+                # Basic check if whisper_timestamped is available
+                try:
+                    subprocess.run([sys.executable, "-m", "whisper_timestamped", "--help"], capture_output=True, check=True, text=True)
+                except (subprocess.CalledProcessError, FileNotFoundError) :
+                    print("ERROR: whisper_timestamped command not found or not runnable. Please ensure it's installed correctly (pip install whisper-timestamped).")
+                    print("Halting pipeline.")
+                    return
+
+                align_cmd = [
+                    sys.executable, "-m", "whisper_timestamped",
+                    acapella_path,
+                    "--model", "small", # Or "base", "medium", "large" - adjust as needed
+                    "--output_dir", args.alignments_json_dir,
+                    "--output_format", "json" # Ensures .json output
+                    # Add other whisper_timestamped flags as desired, e.g., --language en
+                ]
+                if not run_command(align_cmd, f"Forced Alignment for {acapella_file}"):
+                    print(f"Alignment failed for {acapella_file}. This may impact downstream processing for this song.")
+                    # Decide if to halt or continue with other songs
+    else:
+        print("\nSkipping PHASE 1c: Forced Alignment")
+        print(f"Ensure '{args.alignments_json_dir}' is populated with alignment JSONs.")
+
+
+    # --- Phase 2 & 3: Feature Extraction & Flow Data Engineering ---
+    print("\nPHASE 2 & 3: Beat Feature and Flow Data Extraction")
+    # This runs scripts/preprocess_dataset.py
+    preprocess_args = [
+        "--instrumentals_dir", args.instrumentals_dir,
+        "--alignments_dir", args.alignments_json_dir,
+        "--processed_output_dir", args.preprocessed_output_dir,
+        # Pass stem separation info to preprocess_dataset.py
+        "--pre_separated_stems_root_dir", args.stem_output_base_dir, # e.g., data/temp_demucs_separated
+        "--separator_tool_used", "demucs", # Assuming demucs was used above
+        "--demucs_model_name", args.demucs_model
+    ]
+    if args.force_reprocess_features:
+        preprocess_args.append("--force_reprocess")
+
+    if not run_python_script("preprocess_dataset.py", "Preprocess Dataset (Features & Flow)", script_args=preprocess_args):
+        return # Halt if this critical step fails
+
+
+    # --- Phase 4a: Tokenization for Lite Model ---
+    print("\nPHASE 4a: Tokenization for Lite Model")
+    # 05a_tokenize_data_lite.py reads its config from lite_model_training/data_config_lite.yaml
+    # That YAML should point to args.preprocessed_output_dir for its input
+    # and args.tokenized_lite_dir for its output (or configure via YAML)
+    if not run_python_script("05a_tokenize_data_lite.py", "Tokenize Lite Data"):
         return
 
-    print(f"Found {len(song_basenames)} songs to process: {', '.join(song_basenames[:5])}...")
-    print(f"Using Python executable: {PYTHON_EXECUTABLE} for sub-scripts.")
-    print(f"Selected separator tool: {args.separator_tool}")
 
-    # --- Step 1: Source Separation ---
-    if not args.skip_separator:
-        print("\n=== STEP 1: Source Separation ===")
-        for song_name in tqdm(song_basenames, desc=f"{args.separator_tool.capitalize()} Processing"):
-            raw_song_path = None
-            for ext in ['.mp3', '.wav', '.flac']: 
-                p = os.path.join(raw_songs_full_dir, song_name + ext)
-                if os.path.exists(p):
-                    raw_song_path = p
-                    break
-            
-            if not raw_song_path:
-                print(f"  Skipping separation for {song_name}: Raw audio file not found.")
-                continue
+    # --- Phase 4b: Tokenization for Full Model ---
+    print("\nPHASE 4b: Tokenization for Full Model")
+    # 05b_tokenize_data_full.py reads its config from lite_model_training/data_config_full.yaml
+    # Similar to lite, YAML should point to correct input/output dirs.
+    if not run_python_script("05b_tokenize_data_full.py", "Tokenize Full Data"):
+        return
 
-            final_acapella_path = os.path.join(acapellas_dir, f"{song_name}.mp3") # audio-separator can output mp3
-            final_instrumental_path = os.path.join(instrumentals_dir, f"{song_name}.mp3")
-
-            if not args.force_separator and os.path.exists(final_acapella_path) and os.path.exists(final_instrumental_path):
-                print(f"  Skipping separation for {song_name}: Separated files already exist in final destination.")
-                continue
-            
-            success = False
-            if args.separator_tool == "demucs":
-                demucs_output_song_dir = os.path.join(temp_demucs_separated_dir, args.demucs_model, song_name)
-                expected_vocals_demucs_path = os.path.join(demucs_output_song_dir, "vocals.mp3")
-                expected_no_vocals_demucs_path = os.path.join(demucs_output_song_dir, "no_vocals.mp3")
-                
-                demucs_cmd = [
-                    PYTHON_EXECUTABLE, "-m", "demucs",
-                    "--mp3", "--two-stems=vocals", "-n", args.demucs_model,
-                    "-o", temp_demucs_separated_dir, raw_song_path
-                ]
-                if run_command(demucs_cmd, step_name=f"Demucs for {song_name}"):
-                    if os.path.exists(expected_vocals_demucs_path) and os.path.exists(expected_no_vocals_demucs_path):
-                        try:
-                            shutil.move(expected_vocals_demucs_path, final_acapella_path)
-                            shutil.move(expected_no_vocals_demucs_path, final_instrumental_path)
-                            print(f"  Moved Demucs output for {song_name} to final destinations.")
-                            success = True
-                        except Exception as e:
-                            print(f"  Error moving Demucs output for {song_name}: {e}")
-                    else:
-                        print(f"  Demucs output not found at expected paths for {song_name}.")
-            
-            elif args.separator_tool == "audio_separator":
-                # audio-separator usually outputs: output_dir/song_name (Vocals).mp3 and song_name (Instrumental).mp3
-                # We want to control output names more directly.
-                # Let's output to a temporary song-specific folder then move.
-                temp_audio_sep_output_dir = os.path.join(base_dataset_dir, "temp_audio_sep_output", song_name)
-                ensure_dir(temp_audio_sep_output_dir)
-
-                audio_sep_cmd = [
-                    PYTHON_EXECUTABLE, "-m", "audio_separator", raw_song_path,
-                    "--model_name", args.audio_separator_model,
-                    "--output_dir", temp_audio_sep_output_dir,
-                    "--output_format", "MP3", # Outputting as MP3
-                    # "--log_level", "DEBUG" # For more verbose output if needed
-                ]
-                if args.audio_separator_gpu:
-                     audio_sep_cmd.append("--use_cuda") # Or other GPU flags like --gpu_device if needed
-
-                if run_command(audio_sep_cmd, step_name=f"Audio-Separator for {song_name}"):
-                    # Expected output names from audio-separator might vary slightly based on its version
-                    # Common pattern: {filename_without_ext} ({stem_name}).{ext}
-                    original_filename_no_ext = os.path.splitext(os.path.basename(raw_song_path))[0]
-                    
-                    # Try common naming patterns for vocals and instrumental stems
-                    # This might need adjustment based on the exact output of your audio-separator version
-                    # and the specific MDX-Net model used.
-                    # Some models might output "primary_vocals" vs "vocals".
-                    # The model "MDX23C-InstVoc_HQ_1.ckpt" is good for instrumental/vocals.
-                    # It usually outputs "Instrumental" and "Vocals".
-                    
-                    # Let's assume the output files are named based on the input filename + stem type
-                    # e.g. "SongTitle (Vocals).mp3", "SongTitle (Instrumental).mp3"
-                    # Or if it's simpler, it might just be "vocals.mp3" and "instrumental.mp3"
-                    # within the temp_audio_sep_output_dir.
-                    # The most robust way is to list files in temp_audio_sep_output_dir.
-
-                    found_vocals = None
-                    found_instrumental = None
-                    
-                    # List files in the temp output directory for this song
-                    # audio-separator typically creates files like:
-                    # {output_dir}/{model_name}/{input_filename_stem}_(Vocals).{ext}
-                    # {output_dir}/{model_name}/{input_filename_stem}_(Instrumental).{ext}
-                    # The output_dir for audio-separator command is temp_audio_sep_output_dir
-                    # So the files will be in temp_audio_sep_output_dir directly (or in a model-named subfolder)
-
-                    # Let's assume audio-separator places them in temp_audio_sep_output_dir/{model_name}/
-                    # If not, adjust this path.
-                    # If audio-separator --output_dir is set, it creates files like:
-                    # output_dir/filename_Vocals.mp3, output_dir/filename_Instrumental.mp3
-                    # So, they should be directly in temp_audio_sep_output_dir
-
-                    # Try to find vocals and instrumental based on common naming conventions
-                    for f_name in os.listdir(temp_audio_sep_output_dir):
-                        f_path = os.path.join(temp_audio_sep_output_dir, f_name)
-                        if "vocals" in f_name.lower() and f_name.lower().endswith(".mp3"): # Case-insensitive check
-                            found_vocals = f_path
-                        elif "instrumental" in f_name.lower() and f_name.lower().endswith(".mp3"):
-                            found_instrumental = f_path
-                        # Fallback for 'no_vocals' if 'instrumental' isn't found
-                        elif "no_vocals" in f_name.lower() and f_name.lower().endswith(".mp3") and not found_instrumental:
-                            found_instrumental = f_path
-
-                    if found_vocals and found_instrumental:
-                        try:
-                            shutil.move(found_vocals, final_acapella_path)
-                            shutil.move(found_instrumental, final_instrumental_path)
-                            print(f"  Moved Audio-Separator output for {song_name} to final destinations.")
-                            success = True
-                        except Exception as e:
-                            print(f"  Error moving Audio-Separator output for {song_name}: {e}")
-                    else:
-                        print(f"  Audio-Separator output stems not found as expected in '{temp_audio_sep_output_dir}'. Vocals: {found_vocals}, Instrumental: {found_instrumental}")
-                
-                # Clean up temporary audio-separator output directory for this song
-                if os.path.exists(temp_audio_sep_output_dir):
-                    shutil.rmtree(temp_audio_sep_output_dir)
-
-            if not success:
-                print(f"  Separation failed for {song_name}. Skipping further processing for this song.")
-                # continue # This would skip MFA and preprocess for this song
-    else:
-        print("\n=== SKIPPING STEP 1: Source Separation ===")
-
-    mfa_corpus_prepared_count = 0
-    if not args.skip_mfa:
-        print("\n=== STEP 2a: Preparing Corpus for MFA ===")
-        ensure_dir(mfa_input_corpus_dir)
-        if args.force_mfa and os.path.exists(mfa_input_corpus_dir):
-            print(f"  Clearing existing MFA input corpus directory: {mfa_input_corpus_dir}")
-            for item in os.listdir(mfa_input_corpus_dir):
-                item_path = os.path.join(mfa_input_corpus_dir, item)
-                if os.path.isfile(item_path) or os.path.islink(item_path): os.unlink(item_path)
-                elif os.path.isdir(item_path): shutil.rmtree(item_path)
-
-        for song_name in tqdm(song_basenames, desc="MFA Corpus Prep"):
-            acapella_mp3_path = os.path.join(acapellas_dir, f"{song_name}.mp3")
-            lyric_txt_path = os.path.join(lyrics_dir, f"{song_name}.txt")
-            acapella_wav_path_mfa = os.path.join(mfa_input_corpus_dir, f"{song_name}.wav")
-            lyric_txt_path_mfa = os.path.join(mfa_input_corpus_dir, f"{song_name}.txt")
-
-            if not os.path.exists(acapella_mp3_path):
-                print(f"  Skipping MFA prep for {song_name}: Acapella MP3 not found at {acapella_mp3_path}.")
-                continue
-            if not os.path.exists(lyric_txt_path):
-                print(f"  Skipping MFA prep for {song_name}: Lyric TXT not found at {lyric_txt_path}.")
-                continue
-
-            if args.force_mfa or not os.path.exists(acapella_wav_path_mfa):
-                if not convert_mp3_to_wav(acapella_mp3_path, acapella_wav_path_mfa):
-                    print(f"  Failed to convert {song_name} acapella to WAV. Skipping MFA for this song.")
-                    continue
-            
-            if args.force_mfa or not os.path.exists(lyric_txt_path_mfa):
-                try: shutil.copy(lyric_txt_path, lyric_txt_path_mfa)
-                except Exception as e:
-                    print(f"  Failed to copy lyric file for {song_name} to MFA corpus: {e}")
-                    continue
-            mfa_corpus_prepared_count += 1
-        
-        if mfa_corpus_prepared_count == 0: print("  No files prepared for MFA. MFA step will be skipped.")
-        else: print(f"  Prepared {mfa_corpus_prepared_count} songs for MFA in {mfa_input_corpus_dir}")
-
-    if not args.skip_mfa and mfa_corpus_prepared_count > 0:
-        print("\n=== STEP 2b: Forced Alignment (MFA) ===")
-        run_mfa_align = True
-        if not args.force_mfa and os.path.exists(alignments_textgrid_dir) and os.listdir(alignments_textgrid_dir):
-            expected_textgrids = len([f for f in os.listdir(mfa_input_corpus_dir) if f.endswith(".wav")])
-            actual_textgrids = len(glob.glob(os.path.join(alignments_textgrid_dir, "*.TextGrid")))
-            if actual_textgrids >= expected_textgrids and expected_textgrids > 0:
-                print(f"  Skipping MFA alignment: Output directory '{alignments_textgrid_dir}' seems populated and not forcing.")
-                run_mfa_align = False
-        
-        if run_mfa_align:
-            mfa_executable = args.mfa_executable_path if args.mfa_executable_path else "mfa"
-            if not args.mfa_acoustic_model or not args.mfa_dictionary:
-                print("Error: MFA acoustic model or dictionary path not provided. Skipping MFA.")
-            elif not os.path.exists(args.mfa_acoustic_model):
-                print(f"Error: MFA acoustic model not found at {args.mfa_acoustic_model}. Skipping MFA.")
-            elif not os.path.exists(args.mfa_dictionary):
-                print(f"Error: MFA dictionary not found at {args.mfa_dictionary}. Skipping MFA.")
-            else:
-                mfa_align_cmd = [
-                    mfa_executable, "align", mfa_input_corpus_dir,
-                    args.mfa_dictionary, args.mfa_acoustic_model,
-                    alignments_textgrid_dir, "--clean", "--overwrite", "-j", str(args.mfa_jobs)
-                ]
-                if not run_command(mfa_align_cmd, step_name="MFA Alignment"):
-                    print("  MFA alignment process failed. Check MFA logs.")
-                else:
-                    print(f"  MFA alignment complete. TextGrids should be in {alignments_textgrid_dir}")
-    elif args.skip_mfa:
-        print("\n=== SKIPPING STEP 2: Forced Alignment (MFA) & Corpus Prep ===")
-    elif mfa_corpus_prepared_count == 0 and not args.skip_mfa:
-        print("\n=== SKIPPING STEP 2: Forced Alignment (MFA) - No files were prepared for the corpus ===")
-
-    if not args.skip_preprocess:
-        print("\n=== STEP 3: Preprocessing for Transformer Model ===")
-        run_preprocess_script = True
-        if not args.force_preprocess and os.path.exists(final_tokenized_output_file) and os.path.getsize(final_tokenized_output_file) > 100:
-            print(f"  Skipping preprocess_dataset.py: Final tokenized file '{final_tokenized_output_file}' already exists and is valid.")
-            run_preprocess_script = False
-
-        if run_preprocess_script:
-            preprocess_cmd = [
-                PYTHON_EXECUTABLE, os.path.join(os.getcwd(), "scripts", "preprocess_dataset.py"),
-                "--dataset_base_dir", base_dataset_dir, 
-                "--raw_songs_dir", instrumentals_dir, 
-                "--lyrics_dir", lyrics_dir, 
-                "--alignments_dir", alignments_textgrid_dir,
-                "--processed_output_dir", processed_transformer_dir, 
-                "--tokenizer_config", tokenizer_config_path,
-                "--output_tokenized_file", final_tokenized_output_file,
-                "--sample_rate", str(args.sample_rate_preprocess)
-            ]
-            if args.force_preprocess_script_caches: 
-                preprocess_cmd.append("--force_reprocess")
-            if not run_command(preprocess_cmd, step_name="Dataset Preprocessing Script"):
-                print("  Dataset preprocessing script failed. Check its logs.")
-            else:
-                print(f"  Dataset preprocessing script complete. Tokenized data should be at {final_tokenized_output_file}")
-    else:
-        print("\n=== SKIPPING STEP 3: Preprocessing for Transformer Model ===")
-
-    print("\n--- Full Data Pipeline Automation Script Finished ---")
+    print("\n====== Full Data Preparation Pipeline Potentially Complete ======")
+    print("If all steps were successful, your data should be ready for training.")
+    print("Next steps:")
+    print("  - To train the LITE model: python lite_model_training/train_lite_flow_model.py")
+    print("  - To train the FULL model: python scripts/train_flow_model.py")
+    print("  - To visualize flow: python beefai/evaluation/rhythm_visualizer.py")
 
 if __name__ == "__main__":
-    parser = argparse.ArgumentParser(description="Automated data preparation pipeline for beefai flow model.")
-    parser.add_argument("--dataset_dir", type=str, default="data", help="Base directory for the dataset.")
+    parser = argparse.ArgumentParser(description="Run the full BeefAI data preparation pipeline.")
+    parser.add_argument("--skip_setup_prompt", action="store_true", help="Skip the initial setup prompt.")
+    parser.add_argument("--skip_data_acquisition", action="store_true", help="Skip data acquisition/organization phase.")
+    parser.add_argument("--skip_source_separation", action="store_true", help="Skip source separation (Demucs).")
+    parser.add_argument("--skip_forced_alignment", action="store_true", help="Skip forced alignment (whisper-timestamped).")
     
-    # Separator Args
-    parser.add_argument("--separator_tool", type=str, default="demucs", choices=["demucs", "audio_separator"], help="Source separation tool to use.")
-    parser.add_argument("--force_separator", action="store_true", help="Force re-run separation even if separated files exist.")
-    parser.add_argument("--skip_separator", action="store_true", help="Skip the source separation step.")
-    # Demucs specific
-    parser.add_argument("--demucs_model", type=str, default="htdemucs_ft", help="Demucs model name.")
-    # Audio-separator specific
-    parser.add_argument("--audio_separator_model", type=str, default="MDX23C-InstVoc_HQ_1", help="Model name for audio-separator (e.g., from UVR MDX-Net models).")
-    parser.add_argument("--audio_separator_gpu", action="store_true", help="Use GPU for audio-separator if available (requires CUDA setup).")
+    parser.add_argument("--force_rerun_separation", action="store_true", help="Force re-running source separation even if outputs exist.")
+    parser.add_argument("--force_rerun_alignment", action="store_true", help="Force re-running alignment even if outputs exist.")
+    parser.add_argument("--force_reprocess_features", action="store_true", help="Force re-running feature extraction in preprocess_dataset.py (ignores caches).")
 
+    # Path configurations
+    parser.add_argument("--raw_songs_dir", default=DEFAULT_RAW_SONGS_DIR, help="Directory for raw song files.")
+    parser.add_argument("--lyrics_dir", default=DEFAULT_LYRICS_DIR, help="Directory for lyric text files.")
+    parser.add_argument("--instrumentals_dir", default=DEFAULT_INSTRUMENTALS_DIR, help="Output directory for instrumentals.")
+    parser.add_argument("--acapellas_dir", default=DEFAULT_ACAPELLAS_DIR, help="Output directory for acapellas.")
+    parser.add_argument("--alignments_json_dir", default=DEFAULT_ALIGNMENTS_JSON_DIR, help="Output directory for alignment JSONs.")
+    parser.add_argument("--preprocessed_output_dir", default=DEFAULT_PREPROCESSED_OUTPUT_DIR, help="Output directory for preprocess_dataset.py.")
+    # Tokenized data dirs are usually configured in data_config_lite/full.yaml, so not direct args here.
 
-    # MFA Args
-    parser.add_argument("--mfa_executable_path", type=str, default=None, help="Optional full path to the 'mfa' executable if not in system PATH.")
-    parser.add_argument("--mfa_acoustic_model", type=str, required=False, help="Path to MFA acoustic model (.zip file). REQUIRED if not skipping MFA.")
-    parser.add_argument("--mfa_dictionary", type=str, required=False, help="Path to MFA pronunciation dictionary (.dict file). REQUIRED if not skipping MFA.")
-    parser.add_argument("--mfa_jobs", type=int, default=4, help="Number of parallel jobs for MFA.")
-    parser.add_argument("--force_mfa", action="store_true", help="Force re-run MFA alignment and corpus prep even if outputs exist.")
-    parser.add_argument("--skip_mfa", action="store_true", help="Skip the MFA alignment step (and its corpus prep).")
-
-    # Preprocess_dataset.py Args
-    parser.add_argument("--sample_rate_preprocess", type=int, default=44100, help="Sample rate for preprocess_dataset.py feature extraction.")
-    parser.add_argument("--force_preprocess", action="store_true", help="Force re-run of preprocess_dataset.py script even if its final output exists.")
-    parser.add_argument("--force_preprocess_script_caches", action="store_true", help="Pass --force_reprocess to preprocess_dataset.py to ignore its internal caches.")
-    parser.add_argument("--skip_preprocess", action="store_true", help="Skip running the scripts/preprocess_dataset.py script.")
+    # Stem separation specific
+    parser.add_argument("--stem_output_base_dir", default=DEFAULT_STEM_OUTPUT_BASE_DIR, help="Base output directory for Demucs (before model name subdir).")
+    parser.add_argument("--demucs_model", default=DEFAULT_DEMUCS_MODEL, help="Demucs model to use (e.g., htdemucs_ft).")
     
     args = parser.parse_args()
-
-    if not args.skip_mfa and (not args.mfa_acoustic_model or not args.mfa_dictionary):
-        parser.error("--mfa_acoustic_model and --mfa_dictionary are required if --skip_mfa is not set.")
-
     main(args)

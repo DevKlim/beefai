@@ -1,271 +1,194 @@
 import numpy as np
-import time
-from typing import List, Tuple, Optional
-from beefai.utils.data_types import FlowData, FlowDatum, AudioData
-# For real TTS/SVS:
-# from TTS.api import TTS # Example: Coqui TTS
-# import soundfile as sf # Already used for saving
+from typing import List, Optional, Dict
+from beefai.utils.data_types import FlowData, AudioData
+import os
+import soundfile as sf # For saving audio
 
 class RapSynthesizer:
-    def __init__(self, model_name_or_path: Optional[str] = None, voice_sample_path: Optional[str] = None):
+    def __init__(self, sample_rate: int = 22050): # Common sample rate for TTS
+        self.sample_rate = sample_rate
+        print("RapSynthesizer initialized. NOTE: This is a stub and requires TTS/SVS integration for audio synthesis.")
+
+    def synthesize_line(self, lyric_line: str, flow_datum: FlowData) -> Optional[AudioData]:
         """
-        Placeholder for the Text-to-Speech / Singing Voice Synthesis model.
+        Synthesizes a single line of rap. (Currently a STUB)
         """
-        self.model_name = model_name_or_path
-        self.voice_sample_path = voice_sample_path
-        self.tts_model = None
-        self.sample_rate = 22050 # Default sample rate
+        # This requires a proper Speech Synthesis (TTS) or Singing Voice Synthesis (SVS) engine.
+        # For now, it returns silent audio of the expected duration.
+        duration_beats = flow_datum.get("duration_beats", 2.0) # Default if missing
+        bpm = flow_datum.get("bpm_of_bar", 120.0) # Need BPM to convert beats to seconds
+        
+        # This is problematic: flow_datum as defined in data_types.py for the TRANSFORMER TARGET
+        # does not contain bpm_of_bar directly. It contains bar_index, which would need
+        # to be cross-referenced with SongBeatFeatures to get the BPM for that bar.
+        # For simplicity of this stub, we'll assume a fixed BPM or that the caller
+        # enriches flow_datum.
 
-        # try:
-        #     if self.model_name:
-        #         self.tts_model = TTS(model_name=self.model_name, progress_bar=False, gpu=False)
-        #     else:
-        #         print("RapSynthesizer initialized with placeholder. Specify a TTS model for real synthesis.")
-        #     if self.tts_model and hasattr(self.tts_model, 'synthesizer') and hasattr(self.tts_model.synthesizer, 'output_sample_rate'):
-        #          self.sample_rate = self.tts_model.synthesizer.output_sample_rate
-        # except Exception as e:
-        #     print(f"Could not load TTS model {self.model_name}. Synthesizer will output silence or simple tones. Error: {e}")
-        #     self.tts_model = None
-        print(f"RapSynthesizer initialized. (TTS integration placeholder for: {self.model_name or 'default TTS'})")
-
-
-    def synthesize_line(self, lyric_line: str, flow_datum: FlowDatum) -> AudioData:
-        """
-        Synthesizes a single line of rap lyrics based on its flow characteristics.
-        This is a placeholder. A real SVS system would take detailed prosody.
-        """
-        duration_sec = flow_datum.get("duration_sec", 2.0)
-        pitch_contour_id = flow_datum.get("pitch_contour_id", "mid")
-
-        print(f"  Synthesizing line: \"{lyric_line}\" (Duration: {duration_sec:.2f}s, Pitch: {pitch_contour_id})")
-
-        if self.tts_model:
-            # # Real SVS/TTS logic with duration and pitch control (complex)
-            # try:
-            #     # This is highly simplified. True rhythmic/pitch control needs specific model support.
-            #     # Some TTS models allow specifying phoneme durations, or overall speed.
-            #     # For pitch, some allow SSML or similar for basic contours.
-            #     wav = self.tts_model.tts(text=lyric_line, speaker_wav=self.voice_sample_path, language='en')
-            #     waveform = np.array(wav, dtype=np.float32)
-                
-            #     # Crude duration adjustment: time-stretching (can sound bad) or truncate/pad
-            #     # Proper way is to have the model generate to the target duration.
-            #     target_samples = int(duration_sec * self.sample_rate)
-            #     if len(waveform) > 0 and target_samples > 0:
-            #         if len(waveform) != target_samples:
-            #             # Using librosa.effects.time_stretch is one option, but it changes pitch by default if not careful
-            #             # For placeholder, simple truncate/pad
-            #             if len(waveform) > target_samples:
-            #                 waveform = waveform[:target_samples]
-            #             else:
-            #                 waveform = np.pad(waveform, (0, target_samples - len(waveform)), 'constant')
-            #     elif target_samples == 0:
-            #         waveform = np.array([], dtype=np.float32)
-
-            #     return waveform, self.sample_rate
-            # except Exception as e:
-            #     print(f"    TTS synthesis failed for line '{lyric_line}': {e}. Falling back to placeholder tone.")
-            pass # Actual TTS/SVS call
-
-        # Placeholder: Generate a simple tone sequence or modulated noise
+        # A more robust stub would take BPM from BeatInfo or similar context.
+        # For now, let's assume a default BPM if not in flow_datum.
+        beat_duration_sec = 60.0 / bpm
+        duration_sec = duration_beats * beat_duration_sec
+        
         num_samples = int(duration_sec * self.sample_rate)
-        if num_samples <= 0: return np.array([], dtype=np.float32), self.sample_rate
-
-        t = np.linspace(0, duration_sec, num_samples, endpoint=False)
-        waveform = np.zeros(num_samples, dtype=np.float32)
-        
-        # Base frequency
-        base_freq = 150 # Male-ish pitch range
-        if "low" in pitch_contour_id: base_freq = 100
-        elif "high" in pitch_contour_id: base_freq = 200
-        
-        # Pitch contour
-        if "rising" in pitch_contour_id:
-            final_freq = base_freq * 1.5
-            current_freq = np.linspace(base_freq, final_freq, num_samples)
-        elif "falling" in pitch_contour_id:
-            final_freq = base_freq * 0.75
-            current_freq = np.linspace(base_freq, final_freq, num_samples)
-        else: # mid
-            current_freq = np.full_like(t, base_freq)
-
-        # Basic sine wave with harmonics to sound less pure
-        waveform = 0.2 * np.sin(2 * np.pi * current_freq * t)
-        waveform += 0.1 * np.sin(2 * np.pi * current_freq * 2 * t) # Add 1st harmonic
-        waveform += 0.05 * np.sin(2 * np.pi * current_freq * 3 * t) # Add 2nd harmonic
-        
-        # Simple amplitude envelope (e.g., attack-decay)
-        attack_len = min(num_samples // 20, int(0.05 * self.sample_rate)) # 50ms or 5% attack
-        decay_len = num_samples - attack_len 
-        
-        if attack_len > 0 :
-            envelope = np.concatenate([
-                np.linspace(0., 1., attack_len),
-                np.linspace(1., 0.3, decay_len) if decay_len > 0 else np.array([1.0])
-            ])
-            if len(envelope) < num_samples: # Pad if decay_len was 0
-                envelope = np.pad(envelope, (0, num_samples - len(envelope)), 'constant', constant_values=0.3)
-            elif len(envelope) > num_samples: # Truncate if sum too long
-                 envelope = envelope[:num_samples]
-            waveform *= envelope
+        silence = np.zeros(num_samples, dtype=np.float32)
+        # print(f"  Synthesizer (STUB): Generating {duration_sec:.2f}s of silence for line: '{lyric_line}'")
+        return (silence, self.sample_rate)
 
 
-        # Add some filtered noise to simulate fricatives/breath
-        noise = 0.02 * np.random.randn(num_samples)
-        # Simple low-pass filter for noise (convolution with a small window)
-        # For simplicity, we'll just add it directly with less amplitude.
-        waveform += noise
-
-        # Ensure overall amplitude is reasonable
-        if np.max(np.abs(waveform)) > 0:
-             waveform = waveform / np.max(np.abs(waveform)) * 0.5 # Normalize to 0.5 max amplitude
-
-        # Fade in/out to avoid clicks at segment boundaries (if not handled by envelope)
-        fade_samples = min(num_samples // 20, int(0.01 * self.sample_rate)) # 10ms fade
-        if fade_samples > 1: # Ensure fade_samples is large enough for linspace
-            fade_in_curve = np.linspace(0., 1., fade_samples)
-            fade_out_curve = np.linspace(1., 0., fade_samples)
-            waveform[:fade_samples] *= fade_in_curve
-            waveform[-fade_samples:] *= fade_out_curve
-        
-        return waveform.astype(np.float32), self.sample_rate
-
-
-    def synthesize_verse(self, verse_lyrics: List[str], flow_data: FlowData) -> Optional[AudioData]:
+    def synthesize_verse(self, lyrics: List[str], flow_data: FlowData, beat_info: Optional[dict] = None) -> Optional[AudioData]:
         """
-        Synthesizes a full rap verse by placing synthesized lines onto a timeline.
+        Synthesizes a full rap verse from lines of lyrics and flow data.
+        
+        Args:
+            lyrics: A list of lyric lines.
+            flow_data: A list of FlowDatum dicts, corresponding to each lyric line.
+                       Each FlowDatum should ideally have 'start_offset_beats', 'duration_beats', 
+                       and 'bar_index' to map to the beat_info for timing.
+            beat_info: BeatInfo dictionary containing 'bpm' and 'downbeat_times' or 'estimated_bar_duration'
+                       to calculate absolute timing.
+
+        Returns:
+            A tuple (waveform, sample_rate) for the synthesized verse, or None.
         """
-        print("RapSynthesizer: Synthesizing full verse...")
-        if not verse_lyrics or not flow_data or len(verse_lyrics) != len(flow_data):
-            print("Error: Mismatch between lyrics and flow data, or empty input.")
-            print(f"  Lyrics count: {len(verse_lyrics)}, Flow data count: {len(flow_data)}")
+        print("RapSynthesizer.synthesize_verse() called.")
+        error_message = (
+            "Rap audio synthesis is not implemented. This component requires integration "
+            "with a Text-to-Speech (TTS) or Singing Voice Synthesis (SVS) engine capable of "
+            "rendering expressive rap vocals according to the provided flow (timing, rhythm)."
+        )
+        # print(f"ERROR: {error_message}")
+        # To allow a demo pipeline to run, we'll generate silence structured by flow_data
+        # raise NotImplementedError(error_message)
+        
+        if not lyrics or not flow_data or len(lyrics) != len(flow_data):
+            print("  Synthesizer Error: Mismatch between lyrics and flow_data counts, or missing data.")
+            return None
+        if not beat_info or not beat_info.get("bpm"):
+             print("  Synthesizer Warning: Missing BPM from beat_info. Using default 120 BPM for timing estimates.")
+        
+        bpm = beat_info.get("bpm", 120.0) if beat_info else 120.0
+        beat_duration_sec = 60.0 / bpm
+        
+        # Calculate absolute start times for each bar
+        bar_absolute_start_times_sec: Dict[int, float] = {}
+        if beat_info and beat_info.get("downbeat_times"):
+            for i, dt in enumerate(beat_info["downbeat_times"]):
+                bar_absolute_start_times_sec[i] = dt # Assuming downbeats mark bar starts
+        elif beat_info and beat_info.get("estimated_bar_duration", 0) > 0:
+            bar_dur = beat_info["estimated_bar_duration"]
+            num_bars_estimate = int( (flow_data[-1].get("bar_index",0)+1) ) # Estimate from max bar_index in flow
+            for i in range(num_bars_estimate + 4): # Add some buffer bars
+                bar_absolute_start_times_sec[i] = i * bar_dur
+        else: # Fallback if no downbeats or bar duration
+            print("  Synthesizer Warning: Cannot determine absolute bar start times. Lines will be concatenated with fixed pauses.")
+            # Use a simpler concatenation approach.
+            verse_waveform = np.array([], dtype=np.float32)
+            for i, line_text in enumerate(lyrics):
+                fd = flow_data[i]
+                # enrich fd with bpm for the stub synthesize_line
+                fd_enriched = {**fd, "bpm_of_bar": bpm}
+                line_audio_data = self.synthesize_line(line_text, fd_enriched)
+                if line_audio_data:
+                    verse_waveform = np.concatenate((verse_waveform, line_audio_data[0]))
+                    # Add a small fixed pause between lines if no other timing info
+                    pause_samples = int(0.2 * self.sample_rate) 
+                    verse_waveform = np.concatenate((verse_waveform, np.zeros(pause_samples, dtype=np.float32)))
+            if len(verse_waveform) > 0:
+                return (verse_waveform, self.sample_rate)
             return None
 
-        # Determine total duration for the full verse waveform
-        total_duration_sec = 0
-        if flow_data:
-            # Find the time when the last segment ends
-            max_end_time = 0
-            for fd in flow_data:
-                segment_end_time = fd.get("start_time_sec", 0) + fd.get("duration_sec", 0)
-                if segment_end_time > max_end_time:
-                    max_end_time = segment_end_time
-            total_duration_sec = max_end_time
-        
-        if total_duration_sec <= 0:
-            print("Warning: Cannot determine total duration for synthesis from flow_data. Returning empty audio.")
-            return np.array([], dtype=np.float32), self.sample_rate
 
-        total_samples = int(total_duration_sec * self.sample_rate) + int(0.1 * self.sample_rate) # Add small buffer
-        full_verse_waveform = np.zeros(total_samples, dtype=np.float32)
-
-        for i, (lyric_line, flow_datum) in enumerate(zip(verse_lyrics, flow_data)):
-            line_audio_waveform, sr = self.synthesize_line(lyric_line, flow_datum)
+        # Determine total duration needed for the verse waveform
+        max_verse_end_time_sec = 0
+        for fd in flow_data:
+            bar_idx = fd.get("bar_index")
+            if bar_idx is None or bar_idx not in bar_absolute_start_times_sec:
+                print(f"  Synthesizer Warning: Missing bar_index or bar start time for flow datum: {fd}. Cannot place line accurately.")
+                continue # Skip this line if it can't be placed
             
-            if sr != self.sample_rate:
-                print(f"Warning: Sample rate mismatch for line {i+1}. Expected {self.sample_rate}, got {sr}. Resampling (not implemented) or ignoring.")
-                # Ideally, resample here: line_audio_waveform = librosa.resample(line_audio_waveform, orig_sr=sr, target_sr=self.sample_rate)
-                # For now, we'll assume sample rates match or ignore if they don't.
+            bar_start_sec = bar_absolute_start_times_sec[bar_idx]
+            line_start_sec_abs = bar_start_sec + (fd.get("start_offset_beats", 0) * beat_duration_sec)
+            line_duration_sec = fd.get("duration_beats", 0) * beat_duration_sec
+            max_verse_end_time_sec = max(max_verse_end_time_sec, line_start_sec_abs + line_duration_sec)
+
+        if max_verse_end_time_sec == 0:
+            print("  Synthesizer Error: Could not determine verse duration.")
+            return None
+
+        # Create empty waveform for the whole verse
+        total_samples_verse = int(max_verse_end_time_sec * self.sample_rate) + int(self.sample_rate * 0.5) # Add 0.5s buffer
+        full_verse_waveform = np.zeros(total_samples_verse, dtype=np.float32)
+
+        print(f"  Synthesizer (STUB): Generating structured silence for verse (approx {max_verse_end_time_sec:.2f}s).")
+        for i, line_text in enumerate(lyrics):
+            fd = flow_data[i]
+            bar_idx = fd.get("bar_index")
+
+            if bar_idx is None or bar_idx not in bar_absolute_start_times_sec:
                 continue 
+
+            bar_start_sec = bar_absolute_start_times_sec[bar_idx]
+            line_start_offset_sec = fd.get("start_offset_beats", 0) * beat_duration_sec
+            line_duration_sec = fd.get("duration_beats", 0) * beat_duration_sec
+
+            line_abs_start_sample = int((bar_start_sec + line_start_offset_sec) * self.sample_rate)
+            line_num_samples = int(line_duration_sec * self.sample_rate)
             
-            if line_audio_waveform.size == 0:
-                print(f"    Skipping empty audio for line {i+1}: \"{lyric_line}\"")
-                continue
+            # For the stub, we just mark its duration with a small pulse for audibility in the silent track
+            # A real synthesizer would place the synthesized audio here.
+            if line_abs_start_sample + line_num_samples <= total_samples_verse and line_num_samples > 0:
+                # Create a short click or tone at the start of the line stub
+                click_duration_samples = min(line_num_samples, int(0.01 * self.sample_rate)) # 10ms click
+                if click_duration_samples > 0:
+                     # Simple sine wave pulse instead of noise for the "mark"
+                    t_click = np.linspace(0, click_duration_samples / self.sample_rate, click_duration_samples, endpoint=False)
+                    click_signal = 0.3 * np.sin(2 * np.pi * 440 * t_click) # A4 note
+                    full_verse_waveform[line_abs_start_sample : line_abs_start_sample + click_duration_samples] += click_signal
 
-            start_time_sec = flow_datum.get("start_time_sec", 0)
-            start_sample_index = int(start_time_sec * self.sample_rate)
-            end_sample_index = start_sample_index + len(line_audio_waveform)
+        return (full_verse_waveform, self.sample_rate)
 
-            if start_sample_index < 0: # Should not happen with valid flow_data
-                print(f"    Warning: Negative start_sample_index ({start_sample_index}) for line {i+1}. Clamping to 0.")
-                start_sample_index = 0
-                end_sample_index = len(line_audio_waveform)
-
-
-            # Ensure the full_verse_waveform is long enough
-            if end_sample_index > len(full_verse_waveform):
-                print(f"    Info: Extending full_verse_waveform to accommodate line {i+1} (ends at {end_sample_index}, current length {len(full_verse_waveform)}).")
-                padding = np.zeros(end_sample_index - len(full_verse_waveform) + int(0.1 * self.sample_rate), dtype=np.float32)
-                full_verse_waveform = np.concatenate((full_verse_waveform, padding))
-            
-            # Add (mix) the synthesized line into the full verse waveform
-            # Simple additive mixing. Could be more sophisticated (e.g., gain adjustment).
-            try:
-                full_verse_waveform[start_sample_index : end_sample_index] += line_audio_waveform
-            except ValueError as e:
-                 print(f"    Error during mixing line {i+1} into full waveform: {e}")
-                 print(f"      start_sample_index: {start_sample_index}, end_sample_index: {end_sample_index}, line_audio_waveform length: {len(line_audio_waveform)}, full_verse_waveform length: {len(full_verse_waveform)}")
-                 # Attempt to place what fits if shapes mismatch
-                 len_to_mix = min(len(line_audio_waveform), len(full_verse_waveform) - start_sample_index)
-                 if len_to_mix > 0:
-                     full_verse_waveform[start_sample_index : start_sample_index + len_to_mix] += line_audio_waveform[:len_to_mix]
-
-
-        # Normalize the final waveform to prevent clipping if it's not empty
-        max_abs_val = np.max(np.abs(full_verse_waveform))
-        if max_abs_val > 0: # Avoid division by zero if silent
-            # Normalize to a target level e.g. -3dB (0.707) or -6dB (0.5) to leave headroom
-            # If max_abs_val is already > 1.0 (clipping), definitely normalize.
-            # If it's very quiet, boosting too much can amplify noise.
-            # For now, simple normalization if it exceeds 1.0, or to a standard level.
-            if max_abs_val > 1.0:
-                full_verse_waveform /= max_abs_val
-            # else: # Optionally boost if too quiet, but be careful with noise
-            #    if max_abs_val < 0.1 and max_abs_val > 0:
-            #        full_verse_waveform = full_verse_waveform / max_abs_val * 0.5
-        
-        # Trim leading/trailing silence if any (optional, can affect precise start time if not careful)
-        # full_verse_waveform, _ = librosa.effects.trim(full_verse_waveform, top_db=40) # Adjust top_db as needed
-
-        return full_verse_waveform, self.sample_rate
-
-    def save_audio(self, audio_data: AudioData, output_path: str = "output_rap.wav"):
-        """Saves the audio data to a file."""
+    def save_audio(self, audio_data: AudioData, file_path: str):
+        """Saves an audio waveform to a file."""
         waveform, sr = audio_data
-        if waveform.size == 0:
-            print("No audio data to save.")
-            return
-
         try:
-            import soundfile as sf 
-            sf.write(output_path, waveform, sr)
-            print(f"Audio saved to {output_path}")
-        except ImportError:
-            print("Error: 'soundfile' library not found. Cannot save audio. Please install it: pip install soundfile")
+            os.makedirs(os.path.dirname(file_path), exist_ok=True)
+            sf.write(file_path, waveform, sr)
+            print(f"Audio saved to {file_path}")
         except Exception as e:
-            print(f"Error saving audio: {e}. Make sure 'soundfile' and its dependencies (like 'libsndfile') are installed.")
+            print(f"Error saving audio to {file_path}: {e}")
 
-# Example Usage
+
+# Example Usage (illustrative)
 if __name__ == "__main__":
-    synth = RapSynthesizer(model_name_or_path=None) 
+    synth = RapSynthesizer()
     
-    mock_lyrics = [
-        "Yo this is a test run right now",
-        "Flowing on the beat and I'm having some fun",
-        "AI rap is clearly on the rise today",
-        "Watch out world here comes a big surprise hey"
+    dummy_lyrics = [
+        "Yo, check the mic, one two, this is a test.",
+        "Gotta make sure the flow is put to the blessed."
     ]
-    # Ensure flow_data has start_time_sec and duration_sec for each segment
-    mock_flow: FlowData = [
-        {"duration_sec": 2.0, "syllables": 7, "pitch_contour_id": "mid-falling", "start_time_sec": 0.0},
-        {"duration_sec": 2.5, "syllables": 10, "pitch_contour_id": "rising", "start_time_sec": 2.0},
-        {"duration_sec": 2.0, "syllables": 8, "pitch_contour_id": "mid-high", "start_time_sec": 4.5},
-        {"duration_sec": 2.8, "syllables": 11, "pitch_contour_id": "falling-mid", "start_time_sec": 6.5}
+    # FlowData needs bar_index, start_offset_beats, duration_beats
+    # These timings are relative to their respective bars.
+    dummy_flow: FlowData = [
+        {"bar_index": 0, "syllables": 10, "start_offset_beats": 0.0, "duration_beats": 1.75},
+        {"bar_index": 0, "syllables": 12, "start_offset_beats": 2.0, "duration_beats": 1.75},
     ]
-    
-    generated_audio_data = synth.synthesize_verse(mock_lyrics, mock_flow)
-    
-    if generated_audio_data and generated_audio_data[0].size > 0:
-        synth.save_audio(generated_audio_data, "placeholder_rap_verse_timed.wav")
-    else:
-        print("Synthesis failed or produced empty audio.")
+    # BeatInfo provides the absolute timing context for bars
+    dummy_beat_info = {
+        "bpm": 90.0,
+        "beat_times": [i * (60.0/90.0) for i in range(16)], # 4 bars worth of beats
+        "downbeat_times": [i * 4 * (60.0/90.0) for i in range(4)], # Downbeats for 4 bars
+        "beats_per_bar": 4,
+        "estimated_bar_duration": 4 * (60.0/90.0)
+    }
 
-    # Test with slightly overlapping flow data to check mixing
-    mock_flow_overlap: FlowData = [
-        {"duration_sec": 2.0, "syllables": 7, "pitch_contour_id": "mid", "start_time_sec": 0.0},
-        {"duration_sec": 2.0, "syllables": 8, "pitch_contour_id": "high", "start_time_sec": 1.5}, # Overlaps with first
-    ]
-    mock_lyrics_overlap = ["First line here", "Second line overlaps"]
-    generated_audio_overlap = synth.synthesize_verse(mock_lyrics_overlap, mock_flow_overlap)
-    if generated_audio_overlap and generated_audio_overlap[0].size > 0:
-        synth.save_audio(generated_audio_overlap, "placeholder_rap_verse_overlap.wav")
+    print(f"\nAttempting to synthesize verse (stub implementation)...")
+    synthesized_audio = synth.synthesize_verse(dummy_lyrics, dummy_flow, dummy_beat_info)
+    
+    if synthesized_audio and synthesized_audio[0].size > 0:
+        print(f"Synthesized audio (stub) waveform length: {len(synthesized_audio[0])} samples, SR: {synthesized_audio[1]}")
+        output_dir = "temp_synth_output"
+        ensure_dir(output_dir)
+        synth.save_audio(synthesized_audio, os.path.join(output_dir, "stub_verse.wav"))
+        print(f"Stub verse saved to '{output_dir}/stub_verse.wav'. It will be mostly silent with clicks.")
+    else:
+        print("Synthesis (stub) failed or produced empty audio.")

@@ -1,1 +1,32 @@
-praat-textgrids>=1.3.1
+# Core ML and Data
+torch --index-url https://download.pytorch.org/whl/cu118
+torchaudio --index-url https://download.pytorch.org/whl/cu118
+torchvision --index-url https://download.pytorch.org/whl/cu118
+numpy
+scipy>=1.7.0 # Ensure a version compatible with librosa
+pandas
+PyYAML
+
+# Audio Processing
+librosa>=0.9.0 # Later versions handle scipy.signal.get_window better
+soundfile
+pydub
+audioread # librosa dependency, sometimes needs explicit install
+resampy # librosa dependency
+
+# Text Processing
+pyphen
+nltk # For text processing, if used more broadly later
+phonemizer # For phoneme generation
+
+# Alignment & Separation (CLI tools, but Python wrappers might be used)
+whisper-timestamped
+demucs # Optional, for source separation
+audio-separator # Optional, for source separation (UVR models)
+
+# Web App (if running the webapp part)
+# Flask # Example, if you decide to use a Python backend for webapp
+
+# Utilities
+tqdm
+python-dotenv

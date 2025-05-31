@@ -1,74 +1,55 @@
-from typing import List, Dict, Any, Optional, Tuple
+from typing import TypedDict, List, Tuple, Union, Any, Optional
 import numpy as np
 
-# Represents the rhythmic and structural information for a segment of rap
-# This data guides the lyric generation and synthesis.
-# Specifically for the Transformer-based Flow Model, the target is:
-# (bar_index, line_index_in_bar, syllables, start_offset_beats, duration_beats)
-# Pitch contours are ignored for this specific model as per README.
-FlowDatum = Dict[str, Any]
-# Example (structured, before tokenization):
-# {
-#     "bar_index": int,                 # 0-based index of the bar this line primarily belongs to
-#     "line_index_in_bar": int,         # 0-based index of the line within its bar segment for flow
-#     "syllables": int,                 # Target number of syllables for this flow segment
-#     "start_offset_beats": float,      # Start time of the segment in beats, relative to the start of its bar
-#     "duration_beats": float           # Duration of the segment in beats
-# }
+# Audio Processing Related
+AudioData = Tuple[np.ndarray, int] # Waveform, Sample Rate
 
-FlowData = List[FlowDatum] # A sequence of flow datums, typically representing a verse or section
+class BeatInfo(TypedDict):
+    bpm: float
+    beat_times: List[float]
+    downbeat_times: List[float]
+    estimated_bar_duration: float
+    beats_per_bar: int
 
+# Beat Feature Extractor Related
+class BarBeatFeatures(TypedDict):
+    bar_index: int
+    bpm: float
+    time_signature: Tuple[int, int] # e.g., (4, 4)
+    kick_events: List[int]    # List of active subdivision indices (0-15 for 16ths)
+    snare_events: List[int]
+    hihat_events: List[int]
+    bass_events: List[int]    # Onsets of bass notes, quantized
 
-# Represents beat information extracted from an audio track by AudioProcessor (legacy/general)
-BeatInfo = Dict[str, Any]
-# Example (basic, from AudioProcessor):
-# {
-#     "bpm": float,
-#     "beat_times": List[float],       # List of timestamps for each detected beat
-#     "downbeat_times": List[float],   # List of timestamps for each detected downbeat
-#     "beats_per_bar": int,            # Estimated beats per bar (e.g., 4)
-#     "estimated_bar_duration": float  # Estimated duration of a bar in seconds
-# }
+SongBeatFeatures = List[BarBeatFeatures]
 
-# Beat Features for Transformer Input (per bar)
-# This will be the output of `beat_feature_extractor.py`
-BarBeatFeatures = Dict[str, Any]
-# Example:
-# {
-#   "bar_index": int, # 0-based index of the bar in the song
-#   "bpm": float, 
-#   "time_signature": Tuple[int, int], # e.g., (4, 4)
-#   "kick_events": List[int],  # List of active 16th note subdivision indices (0-15) within this bar
-#   "snare_events": List[int],
-#   "hihat_events": List[int],
-#   "bass_events": List[int]
-# }
-SongBeatFeatures = List[BarBeatFeatures] # Represents all bars in a song
+# Text/Lyrics Related
+class WordTiming(TypedDict):
+    word: str
+    start_time: float
+    end_time: float
 
+LyricsData = List[WordTiming] # A list of timed words
 
-# Represents lyrical content with word-level timing, typically from forced alignment
-LyricsData = List[Dict[str, Any]] 
-# Example: 
-# [
-#   {"word": "hello", "start_time": 0.5, "end_time": 0.9},
-#   {"word": "world", "start_time": 1.0, "end_time": 1.5}
-# ]
+# Flow Data Extractor Related
+class FlowDatum(TypedDict):
+    bar_index: int             # Index of the bar this flow line belongs to
+    line_index_in_bar: int     # Index of this line within its assigned bar (0, 1, 2...)
+    syllables: int             # Total syllables in the line
+    start_offset_beats: float  # Start of the line relative to bar start, in beats
+    duration_beats: float      # Duration of the line, in beats
+    syllable_start_subdivisions: List[int] # List of 0-indexed subdivisions (e.g., 0-15)
+                                          # within the bar where syllables of this line start.
 
-# Represents raw audio data
-AudioData = Tuple[np.ndarray, int] # (waveform_array: np.ndarray, sample_rate: int)
+FlowData = List[FlowDatum] # A sequence of flow data for a song or section
 
+# For combining features and targets for training
+class TrainingInstance(TypedDict):
+    song_id: str
+    beat_features: SongBeatFeatures
+    flow_targets: FlowData
 
-# Data for training the flow model:
-# A pair of (input_beat_features_for_song, target_flow_data_for_song)
-# where target_flow_data_for_song is a list of FlowDatum items for that song, associated with the bars in SongBeatFeatures
-TrainingInstance = Dict[str, Any]
-# Example:
-# {
-#   "song_id": "some_unique_id",
-#   "beat_features": SongBeatFeatures, # List of BarBeatFeatures
-#   "flow_targets": FlowData          # List of FlowDatum for the entire song
-# }
-TrainingDataFileContent = List[TrainingInstance]
-
-# Tokenized sequence for the transformer (conceptual, actual format may vary)
-TokenSequence = List[int]
+# Placeholder for more complex phoneme info if needed later
+class PhonemeInfo(TypedDict):
+    phoneme: str
+    duration: Optional[float]

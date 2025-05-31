@@ -3,41 +3,42 @@ import shutil
 import argparse
 
 # --- Configuration ---
-DEFAULT_SOURCE_DIR = "downloaded_songs" # Directory where your .mp3 and .txt files currently are
-DEFAULT_TARGET_BASE_DIR = "data" # The base directory for your organized dataset
+DEFAULT_SOURCE_DIR = "downloaded_songs"
+DEFAULT_DATASET_DIR = "data" # Base directory for your organized dataset
 
-TARGET_MP3_SUBDIR = "raw_songs_full" # Subdirectory for .mp3 files (original full tracks)
-TARGET_TXT_SUBDIR = "lyrics"         # Subdirectory for .txt files
+TARGET_RAW_SONGS_SUBDIR = "raw_songs_full" # For full mix MP3s/WAVs
+TARGET_LYRICS_SUBDIR = "lyrics"
 
-def organize_files(source_dir: str, target_base_dir: str):
+def organize_files(source_dir: str, target_dataset_dir: str):
     """
     Moves .mp3 and .txt files from source_dir to structured subdirectories
-    within target_base_dir.
+    within target_dataset_dir.
     """
-    print(f"Starting organization of files from '{source_dir}' to '{target_base_dir}'...")
+    print(f"Starting organization of files from '{source_dir}' to '{target_dataset_dir}'...")
 
     if not os.path.isdir(source_dir):
         print(f"Error: Source directory '{source_dir}' not found. Please check the path.")
         return
 
     # Define full paths for target subdirectories
-    target_mp3_dir = os.path.join(target_base_dir, TARGET_MP3_SUBDIR)
-    target_txt_dir = os.path.join(target_base_dir, TARGET_TXT_SUBDIR)
+    target_raw_songs_dir = os.path.join(target_dataset_dir, TARGET_RAW_SONGS_SUBDIR)
+    target_lyrics_dir = os.path.join(target_dataset_dir, TARGET_LYRICS_SUBDIR)
 
     # Create target directories if they don't exist
     try:
-        os.makedirs(target_mp3_dir, exist_ok=True)
-        print(f"Ensured target directory for MP3s exists: '{target_mp3_dir}'")
-        os.makedirs(target_txt_dir, exist_ok=True)
-        print(f"Ensured target directory for TXTs exists: '{target_txt_dir}'")
+        os.makedirs(target_raw_songs_dir, exist_ok=True)
+        print(f"Ensured target directory for raw songs exists: '{target_raw_songs_dir}'")
+        os.makedirs(target_lyrics_dir, exist_ok=True)
+        print(f"Ensured target directory for lyrics exists: '{target_lyrics_dir}'")
     except OSError as e:
         print(f"Error creating target directories: {e}")
         return
 
-    moved_mp3_count = 0
-    moved_txt_count = 0
+    moved_audio_count = 0
+    moved_lyrics_count = 0
     skipped_count = 0
     error_count = 0
+    audio_extensions = ('.mp3', '.wav', '.flac', '.m4a')
 
     # Iterate over files in the source directory
     for filename in os.listdir(source_dir):
@@ -49,14 +50,14 @@ def organize_files(source_dir: str, target_base_dir: str):
         destination_filepath = None
         file_type = None
 
-        if filename.lower().endswith(".mp3"):
-            destination_filepath = os.path.join(target_mp3_dir, filename)
-            file_type = "MP3"
+        if filename.lower().endswith(audio_extensions):
+            destination_filepath = os.path.join(target_raw_songs_dir, filename)
+            file_type = "Audio"
         elif filename.lower().endswith(".txt"):
-            destination_filepath = os.path.join(target_txt_dir, filename)
-            file_type = "TXT"
+            destination_filepath = os.path.join(target_lyrics_dir, filename)
+            file_type = "Lyrics"
         else:
-            print(f"  Skipping '{filename}': Not an MP3 or TXT file.")
+            print(f"  Skipping '{filename}': Not a recognized audio or TXT file.")
             continue
 
         if destination_filepath:
@@ -67,39 +68,39 @@ def organize_files(source_dir: str, target_base_dir: str):
                 try:
                     shutil.move(source_filepath, destination_filepath)
                     print(f"  Moved '{filename}' to '{destination_filepath}'.")
-                    if file_type == "MP3":
-                        moved_mp3_count += 1
-                    elif file_type == "TXT":
-                        moved_txt_count += 1
+                    if file_type == "Audio":
+                        moved_audio_count += 1
+                    elif file_type == "Lyrics":
+                        moved_lyrics_count += 1
                 except Exception as e:
                     print(f"  Error moving '{filename}': {e}")
                     error_count += 1
     
     print("\n--- Organization Summary ---")
-    print(f"MP3 files moved: {moved_mp3_count}")
-    print(f"TXT files moved: {moved_txt_count}")
+    print(f"Audio files moved: {moved_audio_count}")
+    print(f"Lyrics files moved: {moved_lyrics_count}")
     print(f"Files skipped (already exist in destination): {skipped_count}")
     print(f"Errors encountered: {error_count}")
     print("Organization complete.")
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(
-        description="Organize .mp3 and .txt files from a source directory into a structured dataset directory.",
+        description="Organize audio and lyric files from a source directory into a structured dataset directory.",
         formatter_class=argparse.ArgumentDefaultsHelpFormatter
     )
     parser.add_argument(
         "--source_dir",
         type=str,
         default=DEFAULT_SOURCE_DIR,
-        help="Directory containing the .mp3 and .txt files to organize."
+        help="Directory containing the .mp3, .wav, .txt etc. files to organize."
     )
     parser.add_argument(
-        "--target_base_dir",
+        "--target_dataset_dir",
         type=str,
-        default=DEFAULT_TARGET_BASE_DIR,
-        help="Base directory where the 'raw_songs_full' and 'lyrics' subdirectories will be created/used."
+        default=DEFAULT_DATASET_DIR,
+        help="Base directory where the structured subdirectories (e.g., 'raw_songs_full', 'lyrics') will be created/used."
     )
     
     args = parser.parse_args()
     
-    organize_files(args.source_dir, args.target_base_dir)
+    organize_files(args.source_dir, args.target_dataset_dir)

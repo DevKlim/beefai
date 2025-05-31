@@ -10,7 +10,7 @@ tokenizer_path: "beefai/flow_model/flow_tokenizer_config_v2.json"
 # --- Inputs for 05a_tokenize_data_lite.py ---
 # This directory contains the cached outputs (beat_features_cache, flow_data_cache)
 # from the main `scripts/preprocess_dataset.py` script.
-processed_data_source_dir: "my_rap_dataset/processed_for_transformer/" # IMPORTANT: Update if your processed data from preprocess_dataset.py is elsewhere.
+processed_data_source_dir: "data/processed_for_transformer/" # IMPORTANT: Update if your processed data from preprocess_dataset.py is elsewhere.
 
 # --- Outputs for 05a_tokenize_data_lite.py ---
 # These .pt files will contain tokenized data ready for FlowDataset.
@@ -29,8 +29,8 @@ checkpoint_dir: "data/checkpoints/flow_model_lite/"
 # --- Parameters below are more for preprocess_dataset.py (or if data_config_lite were used there directly) ---
 # Kept for reference, but `preprocess_dataset.py` currently uses command-line args or its internal defaults
 # for its direct input/output paths.
-# raw_data_dir: "my_rap_dataset/instrumentals/" # This would be for preprocess_dataset
-# processed_data_dir: "my_rap_dataset/processed_for_transformer/" # This is where preprocess_dataset saves
+# raw_data_dir: "data/instrumentals/" # This would be for preprocess_dataset
+# processed_data_dir: "data/processed_for_transformer/" # This is where preprocess_dataset saves
 # phoneme_dict_path: "beefai/data_processing/cmudict-0.7b.txt"
 
 # Audio processing parameters (used by feature extractors called by preprocess_dataset.py)

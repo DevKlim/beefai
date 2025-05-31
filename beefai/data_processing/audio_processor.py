@@ -1,188 +1,160 @@
 import librosa
 import numpy as np
-from typing import List, Tuple
-from beefai.utils.data_types import BeatInfo, AudioData
+from typing import List, Tuple, Optional, Dict
+from scipy import signal # For hann window if needed by other functions
+
+from beefai.utils.data_types import AudioData, BeatInfo
 
 class AudioProcessor:
-    def __init__(self, sample_rate: int = 22050):
-        self.sample_rate = sample_rate
+    def __init__(self, default_sr: int = 44100): # Default SR for internal processing if not specified
+        self.default_sr = default_sr
+        print("AudioProcessor initialized.")
 
-    def load_audio(self, audio_path: str) -> AudioData:
+    def load_audio(self, file_path: str, target_sr: Optional[int] = None) -> AudioData:
         """
         Loads an audio file.
+
+        Args:
+            file_path: Path to the audio file.
+            target_sr: Optional target sample rate to resample to. 
+                       If None, loads at original sample rate.
+
         Returns:
-            Tuple[np.ndarray, int]: Waveform and sample rate.
+            A tuple (waveform, sample_rate), where waveform is a NumPy array
+            and sample_rate is the audio's sample rate (which will be target_sr if specified).
+            Returns (empty array, 0) if loading fails.
         """
         try:
-            waveform, sr = librosa.load(audio_path, sr=self.sample_rate, mono=True)
-            return waveform, sr
+            # librosa.load can take 'sr=None' to load original, or 'sr=target_sr' to load and resample.
+            # If target_sr is not provided, it will load at the original sample rate.
+            # If target_sr is provided, it will resample to target_sr.
+            waveform, sr = librosa.load(file_path, sr=target_sr, mono=True) # Ensure mono for consistency
+            actual_sr = sr # librosa.load returns the sample rate of the loaded audio (which is target_sr if specified)
+            # print(f"Audio loaded from {file_path}. Shape: {waveform.shape}, SR: {actual_sr}")
+            return waveform, actual_sr
         except Exception as e:
-            print(f"Error loading audio file {audio_path}: {e}")
-            return np.array([]), self.sample_rate
+            print(f"Error loading audio file {file_path}: {e}")
+            return np.array([], dtype=np.float32), 0
+
 
     def get_beat_info(self, waveform: np.ndarray, sr: int) -> BeatInfo:
         """
-        Extracts beat information from an audio waveform, including BPM, beat times, and downbeat times.
+        Extracts beat information (BPM, beat times, downbeat times) from an audio waveform.
         """
-        if waveform.size == 0:
-            return {"bpm": 0.0, "beat_times": [], "downbeat_times": [], "estimated_bar_duration": 0.0, "beats_per_bar": 4}
+        if waveform.size == 0 or sr <= 0:
+            print("Error: Empty waveform or invalid sample rate provided to get_beat_info.")
+            return {
+                "bpm": 0.0, "beat_times": [], "downbeat_times": [],
+                "estimated_bar_duration": 0.0, "beats_per_bar": 0
+            }
 
         try:
-            # Use a tighter setting for beat tracking if possible, good for clear instrumentals
-            tempo, beat_frames = librosa.beat.beat_track(y=waveform, sr=sr, trim=False, tightness=100)
+            # Estimate tempo and beat frames
+            # tempo is a single float, beats are frame indices
+            tempo, beat_frames = librosa.beat.beat_track(y=waveform, sr=sr, units='frames')
             beat_times = librosa.frames_to_time(beat_frames, sr=sr)
 
-            # Filter out beat_times that are too close together (e.g. < 50ms), could be errors
-            if len(beat_times) > 1:
-                min_beat_diff = 0.050 # 50 ms
-                valid_beat_times = [beat_times[0]]
-                for i in range(1, len(beat_times)):
-                    if (beat_times[i] - beat_times[i-1]) > min_beat_diff:
-                        valid_beat_times.append(beat_times[i])
-                beat_times = np.array(valid_beat_times)
-        
-        except Exception as e:
-            print(f"Error in librosa.beat.beat_track: {e}. Returning empty beat info.")
-            return {"bpm": 0.0, "beat_times": [], "downbeat_times": [], "estimated_bar_duration": 0.0, "beats_per_bar": 4}
+            if not beat_times.any() or tempo <= 0:
+                print("Warning: Beat tracking failed to find beats or tempo.")
+                return {
+                    "bpm": float(tempo) if tempo > 0 else 120.0, # fallback BPM
+                    "beat_times": beat_times.tolist() if beat_times.any() else [],
+                    "downbeat_times": [],
+                    "estimated_bar_duration": 4 * (60.0 / (tempo if tempo > 0 else 120.0)), # fallback
+                    "beats_per_bar": 4 # fallback
+                }
 
-        downbeat_times = []
-        estimated_bar_duration = 0.0
-        beats_per_bar = 4 # Common assumption for rap music
-
-        if tempo > 0 and len(beat_times) > 0:
-            avg_beat_duration = 60.0 / tempo
-            estimated_bar_duration = beats_per_bar * avg_beat_duration
+            # Estimate downbeats (simplistic: assumes 4/4 time and tempo is fairly constant)
+            # We'll assume beats_per_bar is 4 for this simple estimation.
+            # A more robust system would detect time signature or use a more advanced downbeat tracker.
+            beats_per_bar = 4 
             
-            # Heuristic for downbeats: assume the first beat is a downbeat,
-            # then find subsequent beats that are closest to N*bar_duration later.
-            # This is sensitive to the quality of beat_times and tempo.
+            # Estimate bar duration based on tempo and assumed beats_per_bar
+            estimated_bar_duration = beats_per_bar * (60.0 / tempo)
+
+            # Simple downbeat estimation: pick every Nth beat_time as a downbeat
+            # This is often not very accurate for complex music.
+            downbeat_frames = beat_frames[::beats_per_bar] # Take every `beats_per_bar`-th beat frame
+            downbeat_times = librosa.frames_to_time(downbeat_frames, sr=sr)
             
-            # A simpler heuristic, if beat_times are reliable:
-            # Assume the first beat_time is a downbeat.
-            # Then, every 'beats_per_bar'-th beat in the beat_times array is a downbeat.
-            # This works well if the beat tracking is very accurate and tempo is stable.
-            if len(beat_times) > 0:
-                # Try to align first beat with a musically significant point
-                # For simplicity, we still use the first detected beat as a potential start.
-                # A more advanced approach might involve onset strength or spectral analysis.
-                
-                # Heuristic: first beat_time is a downbeat candidate
-                downbeat_times.append(beat_times[0])
-                
-                # Attempt to find subsequent downbeats based on bar duration
-                # This is challenging because beat_track doesn't guarantee alignment with bar structure.
-                # We'll stick to the Nth beat method for now for simplicity.
-                current_downbeat_candidate_idx = 0
-                while True:
-                    next_potential_downbeat_idx = current_downbeat_candidate_idx + beats_per_bar
-                    if next_potential_downbeat_idx < len(beat_times):
-                        # Check if this Nth beat is reasonably spaced
-                        # (i.e., tempo hasn't drifted wildly making this Nth beat too early/late for a bar)
-                        expected_next_downbeat_time = beat_times[current_downbeat_candidate_idx] + estimated_bar_duration
-                        actual_next_downbeat_time = beat_times[next_potential_downbeat_idx]
-                        
-                        # Tolerance: e.g., within 25% of a beat duration from expected
-                        tolerance = avg_beat_duration * 0.35 
-                        if abs(actual_next_downbeat_time - expected_next_downbeat_time) < tolerance :
-                            downbeat_times.append(actual_next_downbeat_time)
-                            current_downbeat_candidate_idx = next_potential_downbeat_idx
-                        else:
-                            # Try to find the *closest* beat to expected_next_downbeat_time
-                            # search window: from next_potential_downbeat_idx -1 to +1 if they exist
-                            search_indices = [idx for idx in 
-                                              [next_potential_downbeat_idx -1, next_potential_downbeat_idx, next_potential_downbeat_idx +1]
-                                              if 0 <= idx < len(beat_times) and idx > current_downbeat_candidate_idx]
-                            
-                            best_match_idx = -1
-                            min_diff = float('inf')
-                            for s_idx in search_indices:
-                                diff = abs(beat_times[s_idx] - expected_next_downbeat_time)
-                                if diff < tolerance and diff < min_diff :
-                                    min_diff = diff
-                                    best_match_idx = s_idx
-                            
-                            if best_match_idx != -1:
-                                downbeat_times.append(beat_times[best_match_idx])
-                                current_downbeat_candidate_idx = best_match_idx
-                            else:
-                                # print(f"  Could not find a reliable next downbeat after {beat_times[current_downbeat_candidate_idx]:.2f}s. Expected around {expected_next_downbeat_time:.2f}s.")
-                                break # Stop if structure seems lost
-                    else:
-                        break # No more full bars possible
-                
-                downbeat_times = sorted(list(set(downbeat_times))) # Ensure uniqueness and order
+            # A basic check: if the first beat isn't close to the first downbeat, adjust.
+            if len(downbeat_times) > 0 and len(beat_times) > 0 and not np.isclose(downbeat_times[0], beat_times[0], atol=0.1):
+                # Try to align downbeats better if simple slicing is off, e.g., find beat closest to start
+                # This is still heuristic. For real applications, a dedicated downbeat tracker or
+                # manual annotation / more sophisticated beat analysis (e.g. madmom) is better.
+                # For now, let's just use the sliced version.
+                pass
 
-        return {
-            "bpm": float(tempo) if tempo is not None else 0.0,
-            "beat_times": beat_times.tolist() if beat_times is not None else [],
-            "downbeat_times": downbeat_times, # Use the refined list
-            "estimated_bar_duration": round(estimated_bar_duration, 3),
-            "beats_per_bar": beats_per_bar
-        }
 
-    def get_spectrogram(self, waveform: np.ndarray, sr: int, n_fft: int = 2048, hop_length: int = 512) -> np.ndarray:
-        """
-        Computes the Mel spectrogram for a waveform.
-        """
-        if waveform.size == 0:
-            return np.array([])
-        try:
-            mel_spectrogram = librosa.feature.melspectrogram(y=waveform, sr=sr, n_fft=n_fft, hop_length=hop_length)
-            log_mel_spectrogram = librosa.power_to_db(mel_spectrogram, ref=np.max)
-            return log_mel_spectrogram
+            return {
+                "bpm": float(tempo),
+                "beat_times": beat_times.tolist(),
+                "downbeat_times": downbeat_times.tolist(),
+                "estimated_bar_duration": float(estimated_bar_duration),
+                "beats_per_bar": beats_per_bar
+            }
         except Exception as e:
-            print(f"Error computing spectrogram: {e}")
-            return np.array([])
+            print(f"Error during beat analysis: {e}")
+            # Return a default/empty BeatInfo structure on error
+            return {
+                "bpm": 0.0, "beat_times": [], "downbeat_times": [],
+                "estimated_bar_duration": 0.0, "beats_per_bar": 0
+            }
 
-# Example Usage (for testing this module)
+# Example usage (illustrative)
 if __name__ == "__main__":
-    # Test with the dummy instrumental from main.py
-    # This requires running this script from the project root or adjusting path
-    import os
-    # Try to find the beefai_default_instrumental.wav in ../output relative to current file
-    # This assumes data_processing is a subdir of beefai, and output is also a subdir of beefai
-    current_dir = os.path.dirname(os.path.abspath(__file__))
-    project_root = os.path.dirname(current_dir) # up one level to 'beefai'
+    processor = AudioProcessor()
     
-    # Path for dummy instrumental, assuming it's generated by main.py in 'beefai/output/'
-    # This test is a bit fragile due to path assumptions.
-    # For more robust testing, it might be better to call create_dummy_instrumental here
-    # or have a fixed test asset.
-    
-    # Re-create a dummy instrumental for testing AudioProcessor specifically
-    DUMMY_TEST_SR = 22050
-    DUMMY_TEST_BPM = 100.0
-    DUMMY_TEST_DURATION = 15 # seconds
-    
-    test_waveform = np.zeros(int(DUMMY_TEST_SR * DUMMY_TEST_DURATION))
-    test_beat_interval_samples = int(DUMMY_TEST_SR / (DUMMY_TEST_BPM / 60.0))
+    # Create a dummy audio file for testing
+    dummy_audio_path = "temp_dummy_audio.wav"
+    if not os.path.exists(dummy_audio_path):
+        print(f"Creating dummy audio file: {dummy_audio_path}")
+        try:
+            import soundfile as sf
+            sr_test = 44100
+            duration_test = 5 # seconds
+            t_test = np.linspace(0, duration_test, int(sr_test * duration_test), endpoint=False)
+            # A simple tone that librosa can hopefully get a beat from
+            y_test = 0.5 * np.sin(2 * np.pi * 220 * t_test) # A3 note
+            # Add some rhythmic pulses (simulating beats at ~120 BPM)
+            for i in range(int(duration_test * 2)): # 2 pulses per second = 120 BPM
+                 pulse_time = i * 0.5
+                 if pulse_time + 0.1 < duration_test:
+                      y_test[int(pulse_time*sr_test) : int((pulse_time+0.05)*sr_test)] += 0.3 * np.random.rand(len(y_test[int(pulse_time*sr_test) : int((pulse_time+0.05)*sr_test)]))
+            sf.write(dummy_audio_path, y_test, sr_test)
+        except ImportError:
+            print("Please install soundfile to run this example: pip install soundfile")
+        except Exception as e_create:
+            print(f"Error creating dummy audio: {e_create}")
 
-    for i in range(0, len(test_waveform), test_beat_interval_samples):
-        if i + 256 < len(test_waveform): 
-            test_waveform[i : i + 128] = 0.7 
-            if (i // test_beat_interval_samples) % 4 == 0 : 
-                 test_waveform[i : i + 256] = 1.0 # Stronger downbeats
 
-    processor = AudioProcessor(sample_rate=DUMMY_TEST_SR)
-    
-    print("Testing AudioProcessor with generated synthetic waveform (100 BPM)...")
-    beat_info = processor.get_beat_info(test_waveform, DUMMY_TEST_SR)
-    print("\nBeat Info (Synthetic 100BPM):")
-    print(f"  BPM: {beat_info.get('bpm')}")
-    print(f"  Beats per bar: {beat_info.get('beats_per_bar')}")
-    print(f"  Number of detected beats: {len(beat_info.get('beat_times', []))}")
-    print(f"  Number of detected downbeats: {len(beat_info.get('downbeat_times', []))}")
-    print(f"  First few downbeat times: {beat_info.get('downbeat_times', [])[:8]}")
-    print(f"  Estimated bar duration: {beat_info.get('estimated_bar_duration')}")
+    if os.path.exists(dummy_audio_path):
+        print(f"\nTesting load_audio with original SR from {dummy_audio_path}:")
+        waveform_orig, sr_orig = processor.load_audio(dummy_audio_path) # target_sr=None
+        if waveform_orig.size > 0:
+            print(f"  Loaded original. Waveform shape: {waveform_orig.shape}, SR: {sr_orig}")
 
-    # Verify downbeat spacing for the 100 BPM test (expected bar duration: 4 * 60/100 = 2.4s)
-    if beat_info.get('downbeat_times') and len(beat_info['downbeat_times']) > 1:
-        diffs = np.diff(beat_info['downbeat_times'])
-        print(f"  Downbeat time differences: {np.round(diffs[:7], 3)}")
-        expected_bar_dur = beat_info.get('estimated_bar_duration', 2.4)
-        if not np.allclose(diffs, expected_bar_dur, atol=0.1):
-            print(f"  WARNING: Downbeat spacing ({np.mean(diffs):.3f}s avg) is not consistently close to expected bar duration ({expected_bar_dur:.3f}s).")
+            print(f"\nTesting beat info extraction (original SR):")
+            beat_info_orig = processor.get_beat_info(waveform_orig, sr_orig)
+            print(f"  BPM: {beat_info_orig['bpm']:.2f}")
+            print(f"  Num Beats: {len(beat_info_orig['beat_times'])}")
+            print(f"  Num Downbeats: {len(beat_info_orig['downbeat_times'])}")
+            print(f"  First 5 beat times: {beat_info_orig['beat_times'][:5]}")
+            print(f"  First 3 downbeat times: {beat_info_orig['downbeat_times'][:3]}")
 
-    # It's better if main.py, when run, calls its own create_dummy_instrumental
-    # and then uses its own AudioProcessor instance for the game.
-    # This test here is just for the AudioProcessor module itself.
+        print(f"\nTesting load_audio with target_sr=22050 from {dummy_audio_path}:")
+        waveform_resampled, sr_resampled = processor.load_audio(dummy_audio_path, target_sr=22050)
+        if waveform_resampled.size > 0:
+            print(f"  Loaded and resampled. Waveform shape: {waveform_resampled.shape}, SR: {sr_resampled}")
+            
+            # Test beat info on resampled audio too
+            print(f"\nTesting beat info extraction (resampled SR={sr_resampled}):")
+            beat_info_resampled = processor.get_beat_info(waveform_resampled, sr_resampled)
+            print(f"  BPM: {beat_info_resampled['bpm']:.2f}")
+            print(f"  Num Beats: {len(beat_info_resampled['beat_times'])}")
+
+        # Clean up dummy file
+        # os.remove(dummy_audio_path)
+        # print(f"\nRemoved dummy audio file: {dummy_audio_path}")
+    else:
+        print(f"Dummy audio file {dummy_audio_path} not found or not created, skipping tests.")

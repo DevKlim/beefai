@@ -1,155 +1,177 @@
 import numpy as np
 from typing import List, Dict, Tuple, Optional, Any
-from beefai.utils.data_types import FlowDatum, FlowData, SongBeatFeatures, LyricsData
+from beefai.utils.data_types import FlowDatum, FlowData, SongBeatFeatures, LyricsData, BarBeatFeatures, WordTiming
 from beefai.data_processing.text_processor import TextProcessor
-import textgrid # Library for reading Praat TextGrid files (pip install praat-textgrids)
 import os
-import librosa # For loading acapella if needed for advanced pause detection (not primary here)
+import json
+import librosa 
 
-def parse_mfa_textgrid(textgrid_path: str) -> Optional[LyricsData]:
+def parse_whisper_timestamped_json(json_file_path: str) -> Optional[LyricsData]:
     """
-    Parses a TextGrid file (standard output from Montreal Forced Aligner) to get word alignments.
-    Assumes a tier named "words" contains word intervals with timestamps and text.
-    Filters out silence or short pause markers.
+    Parses a JSON file output by whisper-timestamped to get word alignments.
+    Filters out silence or short pause markers if present (though whisper-timestamped usually gives words).
     """
-    if not os.path.exists(textgrid_path):
-        print(f"FlowDataExtractor: TextGrid file not found: {textgrid_path}")
+    if not os.path.exists(json_file_path):
+        print(f"FlowDataExtractor: Whisper-timestamped JSON file not found: {json_file_path}")
         return None
     try:
-        tg = textgrid.TextGrid.fromFile(textgrid_path)
+        with open(json_file_path, 'r', encoding='utf-8') as f:
+            data = json.load(f)
     except Exception as e:
-        print(f"FlowDataExtractor: Error reading TextGrid file {textgrid_path}: {e}")
+        print(f"FlowDataExtractor: Error reading whisper-timestamped JSON file {json_file_path}: {e}")
         return None
 
     word_alignments: LyricsData = []
     
-    # MFA typically puts words in a tier named 'words'.
-    # Some aligners might use the audio filename as the tier name.
-    word_tier_name = None
-    potential_tier_names = ["words", "word", os.path.splitext(os.path.basename(textgrid_path))[0]]
-    
-    for name_candidate in potential_tier_names:
-        if name_candidate in tg.tierNameSet:
-            tier = tg.getFirst(name_candidate)
-            if isinstance(tier, textgrid.IntervalTier) and any(interval.mark for interval in tier): # Check if it has content
-                word_tier_name = name_candidate
-                break
-    
-    if not word_tier_name: # Fallback: try to find any interval tier with word-like content
-        for tier in tg:
-            if isinstance(tier, textgrid.IntervalTier):
-                # Check if a few intervals look like words (not just 'sil' or 'sp')
-                non_sil_intervals = [interval for interval in tier if interval.mark and interval.mark.lower() not in ["sil", "sp", "<s>", "</s>", "<eps>"]]
-                if len(non_sil_intervals) > 0: # If at least one looks like a word
-                    word_tier_name = tier.name
-                    print(f"FlowDataExtractor: Using tier '{word_tier_name}' as it contains word-like intervals.")
-                    break
-    
-    if not word_tier_name:
-        print(f"FlowDataExtractor: Could not find a suitable 'words' tier in {textgrid_path}. Available tiers: {tg.tierNameSet}. Searched for {potential_tier_names}.")
+    if "segments" not in data or not isinstance(data["segments"], list):
+        print(f"FlowDataExtractor: JSON file {json_file_path} does not have the expected 'segments' list structure.")
         return None
 
-    words_tier = tg.getFirst(word_tier_name)
-    for interval in words_tier:
-        # Filter out typical silence/pause markers from MFA/speech processing
-        word_text = interval.mark.strip().lower()
-        if word_text and word_text not in ["", "sp", "sil", "spn", "<eps>", "<s>", "</s>"]: # Common markers
-            word_alignments.append({
-                "word": word_text,
-                "start_time": round(interval.minTime, 4), # Keep precision
-                "end_time": round(interval.maxTime, 4)
-            })
+    for segment in data["segments"]:
+        if "words" not in segment or not isinstance(segment["words"], list):
+            continue 
+
+        for word_info in segment["words"]:
+            if not all(k in word_info for k in ["text", "start", "end"]):
+                continue
+
+            word_text = word_info["text"].strip().lower()
+            if word_text and word_text not in ["", "[Music]", "[ Silence ]", "(Music)", "(Silence)"]: 
+                word_alignments.append({
+                    "word": word_text,
+                    "start_time": round(float(word_info["start"]), 4),
+                    "end_time": round(float(word_info["end"]), 4)
+                })
     
     if not word_alignments:
-        print(f"FlowDataExtractor: No valid word alignments found in tier '{word_tier_name}' of {textgrid_path}.")
+        print(f"FlowDataExtractor: No valid word alignments extracted from {json_file_path}.")
         return None
-        
+            
     return word_alignments
 
 
 class FlowDataExtractor:
-    def __init__(self, sample_rate_for_acapella: int = 44100): # Only if loading acapella audio directly
+    def __init__(self, 
+                 sample_rate_for_acapella: int = 44100, # Only if loading acapella audio directly
+                 subdivisions_per_bar: int = 16 # For syllable landing pattern
+                ): 
         self.sample_rate = sample_rate_for_acapella
         self.text_processor = TextProcessor() 
+        self.subdivisions_per_bar = subdivisions_per_bar
+
+    def _estimate_syllable_timings_for_word(self, word_data: WordTiming) -> List[Dict[str, Any]]:
+        """
+        Estimates start and end times for each syllable in a word.
+        A simple approach: divides word duration equally among its syllables.
+        More advanced: could use pyphen's syllable segmentation and distribute time by syllable length.
+        """
+        syllable_timings: List[Dict[str, Any]] = []
+        word_text = word_data["word"]
+        word_start_time = word_data["start_time"]
+        word_end_time = word_data["end_time"]
+        
+        syllables_list = self.text_processor.get_syllables_from_word(word_text)
+        num_syllables = len(syllables_list)
+
+        if num_syllables == 0:
+            return []
+
+        word_duration = word_end_time - word_start_time
+        if word_duration <= 0: # If word has no duration, assign all syllables to word_start_time
+            for syl_text in syllables_list:
+                syllable_timings.append({
+                    "syllable_text": syl_text,
+                    "start_time": word_start_time,
+                    "end_time": word_start_time
+                })
+            return syllable_timings
+
+        avg_syllable_duration = word_duration / num_syllables
+        current_syllable_start_time = word_start_time
+
+        for i, syl_text in enumerate(syllables_list):
+            syl_start = current_syllable_start_time
+            syl_end = current_syllable_start_time + avg_syllable_duration
+            # Ensure last syllable ends exactly at word_end_time
+            if i == num_syllables - 1:
+                syl_end = word_end_time
+            
+            syllable_timings.append({
+                "syllable_text": syl_text,
+                "start_time": round(syl_start, 4),
+                "end_time": round(syl_end, 4)
+            })
+            current_syllable_start_time = syl_end
+            
+        return syllable_timings
 
     def _segment_words_into_lines(self, 
                                   word_alignments: LyricsData,
-                                  max_pause_sec_between_words_in_line: float = 0.35, # Pause to keep words in same line
-                                  min_pause_sec_for_line_break: float = 0.5,       # Pause to definitely break line
+                                  max_pause_sec_between_words_in_line: float = 0.35, 
+                                  min_pause_sec_for_line_break: float = 0.5,       
                                   min_words_per_line: int = 2,
-                                  max_words_per_line: int = 20 # Generous max
-                                 ) -> List[List[Dict[str, Any]]]: # List of lines, where each line is list of word dicts
-        """
-        Segments a flat list of timed words into lines based on pauses and word counts.
-        More sophisticated methods could use linguistic cues or bar boundaries.
-        """
+                                  max_words_per_line: int = 20 
+                                 ) -> List[List[WordTiming]]: 
         if not word_alignments:
             return []
 
-        lines_of_words: List[List[Dict[str, Any]]] = []
-        current_line_words: List[Dict[str, Any]] = []
+        lines_of_words: List[List[WordTiming]] = []
+        current_line_words: List[WordTiming] = []
         
         for i, word_data in enumerate(word_alignments):
-            if not current_line_words: # First word of a new line
+            if not current_line_words: 
                 current_line_words.append(word_data)
             else:
                 prev_word_end_time = current_line_words[-1]["end_time"]
                 current_word_start_time = word_data["start_time"]
                 pause_duration = current_word_start_time - prev_word_end_time
 
-                # Conditions to break a line:
-                # 1. Pause is too long.
-                # 2. Current line exceeds max words.
                 if pause_duration >= min_pause_sec_for_line_break or \
                    len(current_line_words) >= max_words_per_line:
                     if len(current_line_words) >= min_words_per_line:
                         lines_of_words.append(list(current_line_words))
-                    current_line_words = [word_data] # Start new line with current word
+                    current_line_words = [word_data] 
                 elif pause_duration < max_pause_sec_between_words_in_line:
-                    current_line_words.append(word_data) # Add to current line
-                else: # Pause is between the two thresholds - ambiguous, start new line
+                    current_line_words.append(word_data) 
+                else: 
                     if len(current_line_words) >= min_words_per_line:
                         lines_of_words.append(list(current_line_words))
                     current_line_words = [word_data]
             
-            # If it's the very last word in the entire alignment
             if i == len(word_alignments) - 1:
-                if current_line_words and (lines_of_words and current_line_words != lines_of_words[-1]): # Add if not already added
-                    if len(current_line_words) >= min_words_per_line or not lines_of_words : # Add if long enough or it's the only line
+                if current_line_words and (not lines_of_words or (lines_of_words and current_line_words != lines_of_words[-1])): 
+                    if len(current_line_words) >= min_words_per_line or not lines_of_words : 
                         lines_of_words.append(list(current_line_words))
-                    elif lines_of_words: # Append to previous line if too short and prev line exists
+                    elif lines_of_words: 
                         lines_of_words[-1].extend(current_line_words)
 
-
-        # Final check for any remaining words (should be caught by last word logic)
         if current_line_words and (not lines_of_words or current_line_words != lines_of_words[-1]):
              if len(current_line_words) >= min_words_per_line :
                 lines_of_words.append(list(current_line_words))
-             elif lines_of_words: # Append to previous if short
+             elif lines_of_words: 
                 lines_of_words[-1].extend(current_line_words)
 
         return lines_of_words
 
     def _create_flow_datum_from_line(self, 
-                                     line_words: List[Dict[str, Any]], 
-                                     bar_info_for_line: BarBeatFeatures, # Bar this line is primarily in
-                                     all_song_beat_features: SongBeatFeatures, # For calculating bar start times
-                                     line_idx_in_bar: int # Relative to the assigned bar
+                                     line_words: List[WordTiming], 
+                                     bar_info_for_line: BarBeatFeatures, 
+                                     all_song_beat_features: SongBeatFeatures, 
+                                     line_idx_in_bar: int 
                                      ) -> Optional[FlowDatum]:
         if not line_words: return None
         
         line_actual_start_time_sec = line_words[0]["start_time"]
         line_actual_end_time_sec = line_words[-1]["end_time"]
         
-        syllables_count = sum(self.text_processor.count_syllables_in_word(wd["word"]) for wd in line_words)
-        if syllables_count == 0: return None # Skip lines with no syllables
+        total_syllables_in_line = sum(self.text_processor.count_syllables_in_word(wd["word"]) for wd in line_words)
+        if total_syllables_in_line == 0: return None 
 
-        # Determine the absolute start time of the bar this line belongs to
         current_bar_abs_start_time_sec = 0.0
         found_bar_start = False
-        _bar_starts_map = {} # cache bar start times for performance
+        _bar_starts_map = {} 
 
-        if not _bar_starts_map: # Compute once if not already done
+        if not _bar_starts_map: 
             temp_bar_time = 0.0
             for bf_idx, bf in enumerate(all_song_beat_features):
                 _bar_starts_map[bf["bar_index"]] = temp_bar_time
@@ -157,10 +179,8 @@ class FlowDataExtractor:
                     beat_dur = 60.0 / bf["bpm"]
                     bar_dur = bf["time_signature"][0] * beat_dur
                     temp_bar_time += bar_dur
-                else: # Should not happen with valid beat features
-                    print(f"Warning: Bar {bf['bar_index']} has BPM <= 0. Assuming 2s duration.")
+                else: 
                     temp_bar_time += 2.0
-
 
         target_bar_index = bar_info_for_line["bar_index"]
         if target_bar_index in _bar_starts_map:
@@ -176,37 +196,64 @@ class FlowDataExtractor:
             print(f"Warning: Bar {target_bar_index} has BPM <=0. Cannot calculate beat-relative timings. Skipping.")
             return None
         
+        beats_in_current_bar = bar_info_for_line["time_signature"][0]
         beat_duration_sec = 60.0 / bpm_of_bar
+        bar_duration_sec = beats_in_current_bar * beat_duration_sec
+        if bar_duration_sec <= 0.01: # Avoid division by zero if bar duration is negligible
+            print(f"Warning: Bar {target_bar_index} has near-zero duration. Skipping line.")
+            return None
+        subdivision_duration_sec = bar_duration_sec / self.subdivisions_per_bar
 
-        # Calculate offset and duration in beats
+
         start_offset_beats = (line_actual_start_time_sec - current_bar_abs_start_time_sec) / beat_duration_sec
         duration_beats = (line_actual_end_time_sec - line_actual_start_time_sec) / beat_duration_sec
         
-        # Clamp start_offset_beats: can be slightly negative (pickup) or extend beyond bar for syncopation
-        # For simplicity now, let's clip to be within reasonable bounds relative to bar structure e.g. -1 to beats_per_bar+1
-        beats_in_current_bar = bar_info_for_line["time_signature"][0]
         start_offset_beats = np.clip(start_offset_beats, -1.0, beats_in_current_bar + 1.0) 
-        duration_beats = max(0.1, duration_beats) # Ensure minimum duration
+        duration_beats = max(0.1, duration_beats) 
+
+        # Calculate syllable landing pattern
+        syllable_start_subdivisions: List[int] = []
+        for word_detail in line_words:
+            syllables_in_word = self._estimate_syllable_timings_for_word(word_detail)
+            for syl_timing in syllables_in_word:
+                syl_abs_start_time = syl_timing["start_time"]
+                # Time of syllable relative to the start of its assigned bar
+                syl_time_in_bar = syl_abs_start_time - current_bar_abs_start_time_sec
+                
+                # Quantize to subdivision index
+                # Allow syllables to land slightly before bar start (pickup) or slightly after bar end
+                # by not strictly clipping syl_time_in_bar to [0, bar_duration_sec] before normalization.
+                # The subdivision_index will be clipped later.
+                normalized_time_in_bar = syl_time_in_bar / bar_duration_sec
+                subdivision_index = int(normalized_time_in_bar * self.subdivisions_per_bar)
+                
+                # Clip to valid range [0, self.subdivisions_per_bar - 1]
+                subdivision_index = max(0, min(subdivision_index, self.subdivisions_per_bar - 1))
+                syllable_start_subdivisions.append(subdivision_index)
+        
+        # Remove duplicates and sort, as multiple syllables might land in the same subdivision
+        # or if we want to preserve all landings, don't make it a set.
+        # For now, let's keep all, as it represents a sequence of onsets.
+        # If the tokenizer expects unique positions, this needs adjustment.
+        # The current plan for tokenizer is a sequence of [SYLLABLE_STARTS_SUBDIV_X] tokens,
+        # so duplicates are fine and represent multiple syllables hitting that subdivision.
+        # Sorting might be good for canonical representation if order doesn't matter for the token list.
+        # For now, keep chronological order.
 
         return {
             "bar_index": target_bar_index, 
             "line_index_in_bar": line_idx_in_bar, 
-            "syllables": syllables_count,
+            "syllables": total_syllables_in_line,
             "start_offset_beats": round(start_offset_beats, 3),
-            "duration_beats": round(duration_beats, 3)
-            # Store actual times for reference/debugging if needed:
-            # "actual_start_time_sec": line_actual_start_time_sec,
-            # "actual_end_time_sec": line_actual_end_time_sec
+            "duration_beats": round(duration_beats, 3),
+            "syllable_start_subdivisions": syllable_start_subdivisions 
         }
 
     def extract_flow_for_song(self, 
-                              alignment_data_path: str, # Path to TextGrid file from MFA
-                              song_beat_features: SongBeatFeatures # From BeatFeatureExtractor
+                              alignment_data_path: str, 
+                              song_beat_features: SongBeatFeatures 
                              ) -> Optional[FlowData]:
-        """
-        Extracts a sequence of FlowDatum for an entire song.
-        """
-        word_alignments = parse_mfa_textgrid(alignment_data_path)
+        word_alignments = parse_whisper_timestamped_json(alignment_data_path)
         if not word_alignments:
             print(f"FlowDataExtractor: Failed to get word alignments from {alignment_data_path}.")
             return None
@@ -214,7 +261,6 @@ class FlowDataExtractor:
             print(f"FlowDataExtractor: Missing song_beat_features. Cannot process flow.")
             return None
 
-        # Segment all words from the acapella into lines first
         lines_of_words = self._segment_words_into_lines(word_alignments)
         if not lines_of_words:
             print("FlowDataExtractor: No lines segmented from word alignments.")
@@ -222,7 +268,6 @@ class FlowDataExtractor:
 
         all_flow_data: FlowData = []
         
-        # Pre-calculate absolute start times for each bar for efficient lookup
         bar_absolute_start_times: Dict[int, float] = {}
         current_abs_time = 0.0
         for bar_feat in song_beat_features:
@@ -231,21 +276,15 @@ class FlowDataExtractor:
                 beat_dur = 60.0 / bar_feat["bpm"]
                 bar_duration_sec = bar_feat["time_signature"][0] * beat_dur
                 current_abs_time += bar_duration_sec
-            else: # Should be handled by BFE, but as a fallback
-                print(f"Warning: Bar {bar_feat['bar_index']} in beat features has invalid BPM. Assuming 2s duration.")
+            else: 
                 current_abs_time += 2.0
 
-
-        # Assign lines to bars and create FlowDatum
-        # This logic needs to be robust: a line might span bars or be a pickup.
-        # Heuristic: assign line to the bar in which it *starts*.
-        bar_line_counters: Dict[int, int] = {bar_idx: 0 for bar_idx in range(len(song_beat_features))}
+        bar_line_counters: Dict[int, int] = {bf["bar_index"]: 0 for bf in song_beat_features}
 
         for line_ws in lines_of_words:
             if not line_ws: continue
             line_actual_start_time = line_ws[0]["start_time"]
             
-            # Find the bar this line most likely starts in or just before (pickup)
             assigned_bar_idx = -1
             min_positive_offset_to_bar_start = float('inf')
             closest_bar_for_pickup = -1
@@ -253,25 +292,23 @@ class FlowDataExtractor:
             for bf in song_beat_features:
                 bar_idx = bf["bar_index"]
                 bar_start_t = bar_absolute_start_times.get(bar_idx, -1)
-                if bar_start_t < 0: continue # Should not happen
+                if bar_start_t < 0: continue 
 
                 offset_to_bar = line_actual_start_time - bar_start_t
                 
-                if offset_to_bar >= 0: # Line starts in or after this bar start
+                if offset_to_bar >= 0: 
                     if offset_to_bar < min_positive_offset_to_bar_start:
                         min_positive_offset_to_bar_start = offset_to_bar
                         assigned_bar_idx = bar_idx
                 elif closest_bar_for_pickup == -1 or abs(offset_to_bar) < abs(line_actual_start_time - bar_absolute_start_times.get(closest_bar_for_pickup, float('inf'))):
-                    # If line starts before this bar, consider it a potential pickup for this bar
                      closest_bar_for_pickup = bar_idx
 
-
-            if assigned_bar_idx == -1: # Line might be a pickup to the first bar or fall before any detected bar
-                if closest_bar_for_pickup != -1: # Likely a pickup for 'closest_bar_for_pickup'
+            if assigned_bar_idx == -1: 
+                if closest_bar_for_pickup != -1: 
                     assigned_bar_idx = closest_bar_for_pickup
-                elif song_beat_features : # Default to first bar if no other assignment
+                elif song_beat_features : 
                     assigned_bar_idx = song_beat_features[0]["bar_index"]
-                else: # No bars to assign to
+                else: 
                     print(f"FlowDataExtractor: Cannot assign bar for line starting at {line_actual_start_time:.2f}s (no bar info). Skipping.")
                     continue
             
@@ -291,72 +328,78 @@ class FlowDataExtractor:
         return all_flow_data
 
 if __name__ == '__main__':
-    # To test, you would need:
-    # 1. A dummy TextGrid file (e.g., "dummy_alignment.TextGrid")
-    #    Content example for TextGrid (simplified for testing):
-    dummy_tg_content = """File type = "ooTextFile"
-Object class = "TextGrid"
-xmin = 0 
-xmax = 10
-tiers? <exists> 
-size = 1 
-item []: 
-    item [1]:
-        class = "IntervalTier" 
-        name = "words" 
-        xmin = 0 
-        xmax = 10 
-        intervals: size = 7
-        intervals [1]:
-            xmin = 0.5 
-            xmax = 0.9 
-            text = "yo" 
-        intervals [2]:
-            xmin = 1.0 
-            xmax = 1.4
-            text = "this" 
-        intervals [3]:
-            xmin = 1.5
-            xmax = 1.8
-            text = "is" 
-        intervals [4]:
-            xmin = 2.2  
-            xmax = 2.6 
-            text = "a" 
-        intervals [5]:
-            xmin = 2.7 
-            xmax = 3.3
-            text = "test"
-        intervals [6]:
-            xmin = 4.1
-            xmax = 4.8
-            text = "flow"
-        intervals [7]:
-            xmin = 5.0
-            xmax = 5.5
-            text = "line"
-"""
-    dummy_tg_path = "dummy_alignment_flow_test.TextGrid"
-    if not os.path.exists(dummy_tg_path):
-        with open(dummy_tg_path, "w") as f:
-            f.write(dummy_tg_content)
-        print(f"Created {dummy_tg_path} for testing.")
+    dummy_wt_content = {
+        "text": "yo this is a test flow line another one right here",
+        "segments": [
+            {
+                "words": [
+                    {"word": "yo", "start_time": 0.5, "end_time": 0.9, "text": "yo"}, # Added text for WordTiming
+                    {"word": "this", "start_time": 1.0, "end_time": 1.4, "text": "this"},
+                    {"word": "is", "start_time": 1.5, "end_time": 1.8, "text": "is"}
+                ]
+            },
+            {
+                "words": [
+                    {"word": "a", "start_time": 2.2, "end_time": 2.6, "text": "a"},
+                    {"word": "test", "start_time": 2.7, "end_time": 3.3, "text": "test"}
+                ]
+            },
+            {
+                "words": [
+                    {"word": "flow", "start_time": 4.1, "end_time": 4.8, "text": "flow"},
+                    {"word": "line", "start_time": 5.0, "end_time": 5.5, "text": "line"},
+                    {"word": "another", "start_time": 5.6, "end_time": 6.2, "text": "another"},
+                    {"word": "one", "start_time": 6.3, "end_time": 6.6, "text": "one"},
+                    {"word": "right", "start_time": 6.7, "end_time": 7.0, "text": "right"},
+                    {"word": "here", "start_time": 7.1, "end_time": 7.5, "text": "here"}
+                ]
+            }
+        ]
+    }
+    # Corrected dummy_wt_content to match LyricsData/WordTiming (text field)
+    # and whisper-timestamped output format (word dicts directly in segment["words"])
+    for seg in dummy_wt_content["segments"]:
+        new_words = []
+        for w_dict in seg["words"]:
+             # Ensure the dummy data matches the structure parse_whisper_timestamped_json expects
+            new_words.append({
+                "text": w_dict["word"], # whisper-timestamped uses "text"
+                "start": w_dict["start_time"],
+                "end": w_dict["end_time"],
+                "confidence": 0.9 # dummy confidence
+            })
+        seg["words"] = new_words
 
-    # 2. Dummy SongBeatFeatures (output from BeatFeatureExtractor)
-    # Bar 0: 0-2s (120BPM, 4/4), Bar 1: 2-4s (120BPM, 4/4), Bar 2: 4-6s (120BPM, 4/4)
+
+    dummy_json_path = "dummy_alignment_flow_test_v2.json"
+    if not os.path.exists(dummy_json_path):
+        with open(dummy_json_path, "w") as f:
+            json.dump(dummy_wt_content, f, indent=2)
+        print(f"Created {dummy_json_path} for testing.")
+
     dummy_sbf: SongBeatFeatures = [
-        {"bar_index": 0, "bpm": 120.0, "time_signature": (4, 4), "kick_events": [0, 8], "snare_events": [4, 12], "hihat_events": list(range(0,16,2)), "bass_events": [0]},
-        {"bar_index": 1, "bpm": 120.0, "time_signature": (4, 4), "kick_events": [0, 8], "snare_events": [4, 12], "hihat_events": list(range(0,16,4)), "bass_events": [0,2,4,6]},
-        {"bar_index": 2, "bpm": 120.0, "time_signature": (4, 4), "kick_events": [0,6,10], "snare_events": [4], "hihat_events": [], "bass_events": [8]}
+        {"bar_index": 0, "bpm": 120.0, "time_signature": (4, 4), "kick_events": [0, 8], "snare_events": [4, 12], "hihat_events": list(range(0,16,2)), "bass_events": [0]}, # Bar duration = 2s
+        {"bar_index": 1, "bpm": 120.0, "time_signature": (4, 4), "kick_events": [0, 8], "snare_events": [4, 12], "hihat_events": list(range(0,16,4)), "bass_events": [0,2,4,6]}, # Bar duration = 2s
+        {"bar_index": 2, "bpm": 120.0, "time_signature": (4, 4), "kick_events": [0,6,10], "snare_events": [4], "hihat_events": [], "bass_events": [8]}, # Bar duration = 2s
+        {"bar_index": 3, "bpm": 120.0, "time_signature": (4, 4), "kick_events": [], "snare_events": [], "hihat_events": [], "bass_events": []} # Bar duration = 2s
     ]
 
-    flow_extractor = FlowDataExtractor()
-    print(f"\nExtracting flow from: {dummy_tg_path}")
-    extracted_flow_data = flow_extractor.extract_flow_for_song(dummy_tg_path, dummy_sbf)
+    # Test with subdivisions_per_bar = 16 (default)
+    flow_extractor = FlowDataExtractor(subdivisions_per_bar=16)
+    print(f"\nExtracting flow from: {dummy_json_path} with {flow_extractor.subdivisions_per_bar} subdivisions/bar")
+    extracted_flow_data = flow_extractor.extract_flow_for_song(dummy_json_path, dummy_sbf)
     
     if extracted_flow_data:
         print("\nExtracted Flow Data (Test):")
         for i, fd in enumerate(extracted_flow_data): 
-            print(f"  Segment {i}: {fd}")
+            print(f"  Segment {i}:")
+            for key, val in fd.items():
+                print(f"    {key}: {val}")
     else:
         print("No flow data extracted.")
+
+    # Example: First line "yo this is" (0.5s to 1.8s) in bar 0 (starts 0s, duration 2s).
+    # Word "yo" (0.5-0.9), 1 syllable. syl_time_in_bar = 0.5. norm = 0.5/2 = 0.25. subdiv_idx = 0.25*16 = 4.
+    # Word "this" (1.0-1.4), 1 syllable. syl_time_in_bar = 1.0. norm = 1.0/2 = 0.5. subdiv_idx = 0.5*16 = 8.
+    # Word "is" (1.5-1.8), 1 syllable. syl_time_in_bar = 1.5. norm = 1.5/2 = 0.75. subdiv_idx = 0.75*16 = 12.
+    # Expected for first line: syllable_start_subdivisions: [4, 8, 12]

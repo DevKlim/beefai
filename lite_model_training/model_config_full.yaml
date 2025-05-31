@@ -1,0 +1,19 @@
+# Configuration for the FULL Transformer model architecture
+
+block_size: 256      # Max sequence length (context window)
+n_layer: 6           # Number of Transformer layers
+n_head: 8            # Number of attention heads
+n_embd: 512          # Embedding dimension (must be div by n_head)
+
+max_segment_types: 1024 # Increased from 512 (allows for ~511 bars)
+max_intra_line_positions: 96 # Seems okay
+dropout: 0.1
+bias: True           
+
+# Training specific (can be moved to a training_config.yaml later)
+batch_size: 16
+learning_rate: 0.0003 
+epochs: 100
+grad_accumulation_steps: 4 
+eval_interval_steps: 200
+save_interval_steps: 500

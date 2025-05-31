@@ -4,6 +4,12 @@
 downloaded_songs
 *.mp3
 .env
-data/*
+
 arpa/english_us_arpa.zip
 arpa/english_us_arpa.dict
+kaldi
+montreal-forced-aligner
+*.txt
+*.wav
+__pycache__
+data/*

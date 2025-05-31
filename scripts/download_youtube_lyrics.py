@@ -35,8 +35,8 @@ def sanitize_filename(name: str) -> str:
 # For now, primary focus is lyricsgenius. If GENIUS_ACCESS_TOKEN is not set, it will skip.
 
 def fetch_lyrics_with_genius(song_title: str, artist_name: Optional[str] = None) -> Optional[str]:
-    if not GENIUS_ACCESS_TOKEN or GENIUS_ACCESS_TOKEN == "YOUR_GENIUS_CLIENT_ACCESS_TOKEN_HERE":
-        print("  GENIUS_ACCESS_TOKEN not set in the script. Skipping lyricsgenius fetch.")
+    if not GENIUS_ACCESS_TOKEN or GENIUS_ACCESS_TOKEN == "YOUR_GENIUS_CLIENT_ACCESS_TOKEN_HERE" or GENIUS_ACCESS_TOKEN == "":
+        print("  GENIUS_ACCESS_TOKEN not set or is placeholder. Skipping lyricsgenius fetch.")
         return None
     
     try:
@@ -62,38 +62,48 @@ def fetch_lyrics_with_genius(song_title: str, artist_name: Optional[str] = None)
         
         if not song_result and song_title : 
             if artist_name: 
-                 print(f"  No direct match for '{song_title}' by '{artist_name}'. Trying title only.")
-            song_result = genius.search_song(song_title)
+                 print(f"  No direct match for '{song_title}' by '{artist_name}'. Trying title only: '{song_title}'")
+            song_result = genius.search_song(song_title) # Search by title only if artist combo failed
 
         if song_result:
             print(f"  Lyrics found via lyricsgenius for '{song_result.title}' (Artist: {song_result.artist})")
             lyrics_text = song_result.lyrics.strip()
             
             # Additional cleaning for common Genius artifacts
-            lyrics_text = re.sub(r"^\d*EmbedShare URLCopyEmbedCopy$", "", lyrics_text, flags=re.MULTILINE | re.IGNORECASE).strip()
-            lyrics_text = re.sub(r"\d*Embed$", "", lyrics_text, flags=re.IGNORECASE).strip() 
-            lyrics_text = re.sub(r"You might also like", "", lyrics_text, flags=re.IGNORECASE).strip() 
-            lyrics_text = re.sub(r"^\[[^\]]+\]\s*\n?", "", lyrics_text, flags=re.MULTILINE) # Remove [Verse], [Chorus] at start of lines
-
-            # Specifically remove the "ContributorsTranslations..." line if it's the first line
-            lines = lyrics_text.split('\n')
-            if lines:
-                # Pattern to match "Number Contributors", "Translations", language names
-                # Example: "364 ContributorsTranslationsFrançaisTü"
-                # More general: Starts with a number, then "Contributor(s)", then optionally "Translations", then language names / special chars
-                # Regex: r"^\d+\s*Contributors?(Translations)?([A-Za-zÀ-ÖØ-öø-ÿ\s]+)?$"
-                # Simpler check for the observed pattern:
-                first_line_pattern = r"^\d+\s*Contributor(s)?(Translations)?([A-Za-zÀ-ÖØ-öø-ÿ\s]+)?$"
-                if re.match(first_line_pattern, lines[0].strip(), re.IGNORECASE):
-                    print(f"  Removing detected metadata line: '{lines[0]}'")
-                    lines.pop(0)
-                # Also remove the actual word "Lyrics" if it appears as the first line after metadata
-                if lines and lines[0].strip().lower() == "lyrics":
-                    print(f"  Removing detected 'Lyrics' header line: '{lines[0]}'")
-                    lines.pop(0)
-
-            lyrics_text = "\n".join(lines).strip()
+            # Pattern to remove lines like "Number Contributors...Lyrics", e.g., "364ContributorsTranslationsFrançaisTüLyrics"
+            # This also handles cases where "Lyrics" might be on the next line or part of the metadata line.
+            # The main problem is the "Contributors...Lyrics" part.
             
+            lines = lyrics_text.split('\n')
+            cleaned_lines = []
+            metadata_header_pattern = r"^\d+\s*Contributor(s)?.*?Lyrics$" # Catches "123 Contributors...Lyrics"
+            lyrics_header_pattern = r"^\s*Lyrics\s*$" # Catches a line that is just "Lyrics"
+
+            # Remove initial metadata/header lines
+            temp_lines = list(lines) # Work on a copy
+            
+            if temp_lines:
+                # Check first line for "Number Contributors...Lyrics"
+                if re.match(metadata_header_pattern, temp_lines[0].strip(), re.IGNORECASE):
+                    print(f"  Removing detected Genius metadata header: '{temp_lines[0].strip()}'")
+                    temp_lines.pop(0)
+                
+                # Check (potentially new) first line for just "Lyrics"
+                if temp_lines and re.match(lyrics_header_pattern, temp_lines[0].strip(), re.IGNORECASE):
+                    print(f"  Removing detected 'Lyrics' header: '{temp_lines[0].strip()}'")
+                    temp_lines.pop(0)
+            
+            lyrics_text = "\n".join(temp_lines).strip()
+
+            # Remove [Verse], [Chorus] etc. if they are at the very start of a line
+            lyrics_text = re.sub(r"^\[[^\]]+\]\s*\n?", "", lyrics_text, flags=re.MULTILINE)
+            
+            # Remove common trailing footers
+            lyrics_text = re.sub(r"\d*EmbedShare URLCopyEmbedCopy$", "", lyrics_text, flags=re.MULTILINE | re.IGNORECASE).strip()
+            lyrics_text = re.sub(r"\d*Embed$", "", lyrics_text, flags=re.IGNORECASE).strip() 
+            lyrics_text = re.sub(r"You might also like.*?(\n|$)", "", lyrics_text, flags=re.IGNORECASE | re.DOTALL).strip()
+
+
             return lyrics_text
         else:
             print(f"  No song found on Genius for '{search_term_display}'.")
@@ -110,12 +120,15 @@ def process_video_entry(video_info: Dict[str, Any], output_dir: str, skip_existi
         return
 
     original_title = video_info.get('title', 'Unknown_Title')
-    base_filename_sanitized = sanitize_filename(original_title)
+    # Sanitize filename from the original title to ensure consistency
+    base_filename_sanitized = sanitize_filename(original_title) 
     
+    # Define final paths using the sanitized base filename
     mp3_final_filepath = os.path.join(output_dir, f"{base_filename_sanitized}.mp3")
     txt_filepath = os.path.join(output_dir, f"{base_filename_sanitized}.txt")
 
     print(f"\nProcessing: {original_title} (URL: {video_url})")
+    print(f"  Sanitized base: {base_filename_sanitized}")
     print(f"  MP3 target: {mp3_final_filepath}")
     print(f"  TXT target: {txt_filepath}")
 
@@ -127,10 +140,12 @@ def process_video_entry(video_info: Dict[str, Any], output_dir: str, skip_existi
         audio_downloaded_successfully = True
     elif mp3_exists_and_valid: 
         print(f"  MP3 {mp3_final_filepath} already exists. Download behavior depends on 'overwrites' yt-dlp option.")
-        audio_downloaded_successfully = True 
+        audio_downloaded_successfully = True # Assume it's good if it exists, overwrite handles staleness
     
-    if not audio_downloaded_successfully: 
-        output_template_base = os.path.join(output_dir, base_filename_sanitized)
+    if not audio_downloaded_successfully:
+        # Use the sanitized base filename for the output template to avoid double extension issues.
+        # yt-dlp will add its own .mp3 (or .webm then converted to .mp3)
+        output_template_for_yt_dlp = os.path.join(output_dir, base_filename_sanitized) # NO extension here
 
         ydl_opts_single = {
             'format': 'bestaudio/best',
@@ -139,11 +154,11 @@ def process_video_entry(video_info: Dict[str, Any], output_dir: str, skip_existi
                 'preferredcodec': 'mp3',
                 'preferredquality': '192',
             }],
-            'outtmpl': output_template_base + '.%(ext)s',
+            'outtmpl': output_template_for_yt_dlp + '.%(ext)s', # yt-dlp adds extension
             'quiet': False,
             'ignoreerrors': True,
-            'restrictfilenames': False,
-            'overwrites': not skip_existing,
+            'restrictfilenames': False, # Let sanitize_filename handle it before ytdlp
+            'overwrites': not skip_existing, # If skip_existing is false, then overwrite is true
             'nocheckcertificate': True,
             'keepvideo': False,
         }
@@ -151,28 +166,18 @@ def process_video_entry(video_info: Dict[str, Any], output_dir: str, skip_existi
             with YoutubeDL(ydl_opts_single) as ydl_single:
                 error_code = ydl_single.download([video_url])
                 
+                # After download, check if the mp3_final_filepath exists and is valid
                 if os.path.exists(mp3_final_filepath) and os.path.getsize(mp3_final_filepath) > 1000:
                     print(f"  Successfully downloaded and converted audio to: {mp3_final_filepath}")
                     audio_downloaded_successfully = True
                 else:
-                    double_ext_filepath = mp3_final_filepath + ".mp3" 
-                    if os.path.exists(double_ext_filepath) and os.path.getsize(double_ext_filepath) > 1000:
-                        print(f"  Found file with double extension: {double_ext_filepath}. Renaming to {mp3_final_filepath}")
-                        try:
-                            if os.path.exists(mp3_final_filepath):
-                                os.remove(mp3_final_filepath)
-                            os.rename(double_ext_filepath, mp3_final_filepath)
-                            if os.path.exists(mp3_final_filepath) and os.path.getsize(mp3_final_filepath) > 1000:
-                                print(f"  Successfully renamed. Final audio: {mp3_final_filepath}")
-                                audio_downloaded_successfully = True
-                        except Exception as rename_e:
-                            print(f"  Error renaming {double_ext_filepath} to {mp3_final_filepath}: {rename_e}")
-                    
-                    if not audio_downloaded_successfully:
-                        print(f"  yt-dlp potentially failed (error code: {error_code}). Final MP3 '{mp3_final_filepath}' not found or too small.")
-                        if os.path.exists(mp3_final_filepath) and os.path.getsize(mp3_final_filepath) < 1000:
-                            try: os.remove(mp3_final_filepath)
-                            except: pass
+                    # This case should be less common if outtmpl is correct, but check just in case
+                    # for temp files or if preferredcodec was not available and it saved as something else.
+                    # For now, assume if mp3_final_filepath isn't there, it failed.
+                    print(f"  yt-dlp download process finished (code: {error_code}). Final MP3 '{mp3_final_filepath}' not found or too small.")
+                    if os.path.exists(mp3_final_filepath) and os.path.getsize(mp3_final_filepath) <= 1000:
+                        try: os.remove(mp3_final_filepath); print(f"  Removed small/invalid file: {mp3_final_filepath}")
+                        except: pass
                             
         except Exception as e:
             print(f"  Exception during audio download for {video_url}: {e}")
@@ -182,20 +187,30 @@ def process_video_entry(video_info: Dict[str, Any], output_dir: str, skip_existi
     if skip_existing and lyrics_exist_and_valid:
         print(f"  Lyrics file already exists and is valid: {txt_filepath}. Skipping fetch.")
     elif audio_downloaded_successfully: 
-        artist = video_info.get('artist') or video_info.get('uploader') or video_info.get('channel')
+        # Try to get artist info from metadata
+        artist = video_info.get('artist') or video_info.get('creator') or video_info.get('uploader') or video_info.get('channel')
         
+        # Clean title for lyric search (remove "official video", "(lyrics)", etc.)
         cleaned_title_for_lyrics = original_title
         common_video_terms = [
             r"official video", r"music video", r"lyrics video", r"lyric video",
-            r"official audio", r"audio", r"hd", r"hq", r"4k", r"\(.*?\)", r"\[.*?\]",
-            r"ft\.", r"feat\."
+            r"official audio", r"audio", r"hd", r"hq", r"4k", 
+            r"\((?:official|music|lyric|audio|video|visualizer|live|explicit|clean|extended|remix|acoustic)[^)]*\)", # More specific parenthesized terms
+            r"\[(?:official|music|lyric|audio|video|visualizer|live|explicit|clean|extended|remix|acoustic)[^\]]*\]", # More specific bracketed terms
+            r"\s*-\s*Lyrics", # Remove "- Lyrics"
+            r"ft\.", r"feat\.", r"prod\." # Common abbreviations
         ]
         for term in common_video_terms:
             cleaned_title_for_lyrics = re.sub(term, "", cleaned_title_for_lyrics, flags=re.IGNORECASE).strip()
+        
+        # If artist was found in title, try to remove it as well to get a cleaner song title
         if artist:
-             cleaned_title_for_lyrics = re.sub(r"\s*-\s*" + re.escape(artist) + r"\s*$", "", cleaned_title_for_lyrics, flags=re.IGNORECASE).strip()
+             # Escape artist name for regex, then try to remove " - ARTIST" or "ARTIST - " patterns
+             escaped_artist = re.escape(artist)
+             cleaned_title_for_lyrics = re.sub(r"\s*-\s*" + escaped_artist + r"\s*$", "", cleaned_title_for_lyrics, flags=re.IGNORECASE).strip()
+             cleaned_title_for_lyrics = re.sub(r"^" + escaped_artist + r"\s*-\s*", "", cleaned_title_for_lyrics, flags=re.IGNORECASE).strip()
 
-        cleaned_title_for_lyrics = re.sub(r'\s{2,}', ' ', cleaned_title_for_lyrics)
+        cleaned_title_for_lyrics = re.sub(r'\s{2,}', ' ', cleaned_title_for_lyrics).strip() # Consolidate multiple spaces
 
         lyrics_content = fetch_lyrics_with_genius(cleaned_title_for_lyrics, artist)
         if lyrics_content:
@@ -206,7 +221,7 @@ def process_video_entry(video_info: Dict[str, Any], output_dir: str, skip_existi
             except IOError as e:
                 print(f"  Error saving lyrics to {txt_filepath}: {e}")
         else:
-            print(f"  No lyrics found via lyricsgenius for '{original_title}'. Creating placeholder TXT.")
+            print(f"  No lyrics found via lyricsgenius for '{original_title}' (searched as: '{cleaned_title_for_lyrics}', artist: '{artist}'). Creating placeholder TXT.")
             try:
                 with open(txt_filepath, 'w', encoding='utf-8') as f:
                     f.write(f"[Lyrics for '{original_title}' (search term: '{cleaned_title_for_lyrics}', artist: '{artist}') not found via lyricsgenius.]")
@@ -231,9 +246,9 @@ def main():
     if args.genius_token:
         GENIUS_ACCESS_TOKEN = args.genius_token
     
-    if not GENIUS_ACCESS_TOKEN or GENIUS_ACCESS_TOKEN == "YOUR_GENIUS_CLIENT_ACCESS_TOKEN_HERE":
+    if not GENIUS_ACCESS_TOKEN or GENIUS_ACCESS_TOKEN == "YOUR_GENIUS_CLIENT_ACCESS_TOKEN_HERE" or GENIUS_ACCESS_TOKEN == "":
         print("WARNING: Genius API token is not set. Lyrics fetching via LyricsGenius will be skipped.")
-        print("Please provide it via --genius_token argument or GENIUS_ACCESS_TOKEN environment variable, or edit it directly in the script.")
+        print("Please provide it via --genius_token argument or GENIUS_ACCESS_TOKEN environment variable, or create a .env file with it.")
 
 
     if not os.path.exists(args.url_file):
@@ -254,10 +269,10 @@ def main():
     ydl_opts_info = {
         'quiet': True,
         'ignoreerrors': True,
-        'extract_flat': False, 
+        'extract_flat': False, # Set to False to get individual video info from playlists
         'skip_download': True, 
         'nocheckcertificate': True,
-        'playlist_items': '1-500' 
+        'playlist_items': '1-500' # Limit playlist items if needed
     }
 
     with YoutubeDL(ydl_opts_info) as ydl_info_extractor:
@@ -271,11 +286,10 @@ def main():
                     continue
 
                 actual_videos: List[Dict[str, Any]] = []
-                if result_info_data.get('_type') == 'playlist':
+                # Check if it's a playlist or a single video with entries
+                if result_info_data.get('_type') == 'playlist' or 'entries' in result_info_data:
                     actual_videos = [entry for entry in result_info_data.get('entries', []) if entry]
-                elif 'entries' in result_info_data : 
-                    actual_videos = [entry for entry in result_info_data.get('entries', []) if entry] 
-                else: 
+                else: # Single video
                     actual_videos = [result_info_data]
                 
                 if not actual_videos:

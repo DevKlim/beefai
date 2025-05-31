@@ -1,157 +1,334 @@
 import torch
 import torch.optim as optim
 from torch.utils.data import DataLoader
+from torch.optim.lr_scheduler import OneCycleLR 
+from torch.utils.tensorboard import SummaryWriter
 from tqdm import tqdm
 import os
+import yaml 
 import time
+import sys
+import random # For setting seeds
+import numpy as np # For setting seeds
+import torch.nn as nn # Added for nn.Module in save_checkpoint
+
+# Adjust import paths if beefai is not directly in PYTHONPATH
+sys.path.append(os.getcwd()) 
 
 from beefai.flow_model.tokenizer import FlowTokenizer
 from beefai.flow_model.transformer_model import FlowTransformerDecoder, FlowGPTConfig
-from beefai.flow_model.dataset import FlowDataset # Make sure this is correctly importable
+from beefai.flow_model.dataset import FlowDataset
 
-# --- Configuration ---
-# Data paths
-TOKENIZER_PATH = "data/tokenizer_config.json"
-TRAIN_DATA_PATH = "data/tokenized/train_data.pt"
-VAL_DATA_PATH = "data/tokenized/val_data.pt" # Optional, but highly recommended
-CHECKPOINT_DIR = "data/checkpoints/flow_model/"
-os.makedirs(CHECKPOINT_DIR, exist_ok=True)
+# --- Configuration Loading ---
+def load_yaml_config(path):
+    with open(path, 'r') as f:
+        return yaml.safe_load(f)
 
-# Model Hyperparameters
-BLOCK_SIZE = 256  # Max sequence length (must match data tokenization)
-N_LAYER = 6
-N_HEAD = 6
-N_EMBD = 384 # n_embd must be div by n_head
-MAX_SEGMENT_TYPES = 4 # Should match tokenizer/data prep (e.g., for up to 4 lines per bar)
-MAX_INTRA_LINE_POSITIONS = 4 # For LINE_START, SYL, OFFSET, DUR
-DROPOUT = 0.1
+# Default paths for config files - these define the "FULL" model training
+MODEL_CONFIG_FULL_PATH = "lite_model_training/model_config_full.yaml" 
+DATA_CONFIG_FULL_PATH = "lite_model_training/data_config_full.yaml"   
 
-# Training Hyperparameters
-BATCH_SIZE = 16 # Adjust based on GPU memory
-LEARNING_RATE = 3e-4
-EPOCHS = 10
-GRAD_ACCUMULATION_STEPS = 4 # Accumulate gradients for effective batch size BATCH_SIZE * GRAD_ACCUMULATION_STEPS
-EVAL_INTERVAL = 200 # Steps
-SAVE_INTERVAL = 1000 # Steps
+# --- Default Training Hyperparameters (can be overridden by YAML) ---
+DEFAULT_BATCH_SIZE = 16
+DEFAULT_LEARNING_RATE = 5e-5 # Common starting LR for transformers
+DEFAULT_EPOCHS = 20 # Reduced from 100 for practical initial runs
+DEFAULT_GRAD_ACCUMULATION_STEPS = 4
+DEFAULT_EVAL_INTERVAL_STEPS = 200
+DEFAULT_SAVE_INTERVAL_STEPS = 1000 # Save less frequently than eval
+DEFAULT_WEIGHT_DECAY = 0.01
+DEFAULT_SEED = 42
+
 DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
+# Automatic Mixed Precision (AMP) - enable if using CUDA and PyTorch >= 1.6
+USE_AMP = True if DEVICE == "cuda" and hasattr(torch.cuda.amp, 'GradScaler') else False 
+# Compile model with torch.compile (PyTorch 2.0+) - enable if using CUDA
+COMPILE_MODEL = hasattr(torch, 'compile') and DEVICE == "cuda"
 
-def train():
+
+def set_seed(seed_value):
+    random.seed(seed_value)
+    np.random.seed(seed_value)
+    torch.manual_seed(seed_value)
+    if torch.cuda.is_available():
+        torch.cuda.manual_seed_all(seed_value)
+        torch.backends.cudnn.deterministic = True # Can impact performance
+        torch.backends.cudnn.benchmark = False    # Can impact performance
+
+def train_full_model(): # Renamed function for clarity
+    print(f"--- Training FULL Flow Model ---")
+    
+    # Load configurations
+    if not os.path.exists(MODEL_CONFIG_FULL_PATH):
+        print(f"ERROR: Model config not found: {MODEL_CONFIG_FULL_PATH}"); return
+    model_params_yaml = load_yaml_config(MODEL_CONFIG_FULL_PATH)
+    
+    if not os.path.exists(DATA_CONFIG_FULL_PATH):
+        print(f"ERROR: Data config not found: {DATA_CONFIG_FULL_PATH}"); return
+    data_params_yaml = load_yaml_config(DATA_CONFIG_FULL_PATH)
+
+    # Get training parameters, using defaults if not in YAML
+    batch_size = model_params_yaml.get("batch_size", DEFAULT_BATCH_SIZE)
+    learning_rate = model_params_yaml.get("learning_rate", DEFAULT_LEARNING_RATE)
+    epochs = model_params_yaml.get("epochs", DEFAULT_EPOCHS)
+    grad_accumulation_steps = model_params_yaml.get("grad_accumulation_steps", DEFAULT_GRAD_ACCUMULATION_STEPS)
+    eval_interval_steps = model_params_yaml.get("eval_interval_steps", DEFAULT_EVAL_INTERVAL_STEPS)
+    save_interval_steps = model_params_yaml.get("save_interval_steps", DEFAULT_SAVE_INTERVAL_STEPS)
+    weight_decay = model_params_yaml.get("weight_decay", DEFAULT_WEIGHT_DECAY)
+    seed = model_params_yaml.get("seed", DEFAULT_SEED)
+    
+    set_seed(seed)
+    print(f"Random seed set to: {seed}")
+
     print(f"Using device: {DEVICE}")
+    if USE_AMP: print("Using Automatic Mixed Precision (AMP).")
+    if COMPILE_MODEL: print("Attempting to compile model (PyTorch 2.0+).")
+
+    # TensorBoard setup
+    # Checkpoint dir from data_params_yaml, as it often contains paths
+    checkpoint_dir = data_params_yaml.get("checkpoint_dir", "data/checkpoints/flow_model_full/")
+    os.makedirs(checkpoint_dir, exist_ok=True) # Ensure base checkpoint_dir exists
+    
+    log_runs_dir = os.path.join(checkpoint_dir, 'runs_full') # Specific subdir for full model runs
+    os.makedirs(log_runs_dir, exist_ok=True)
+    run_name = f'full_model_exp_{time.strftime("%Y%m%d-%H%M%S")}'
+    writer = SummaryWriter(log_dir=os.path.join(log_runs_dir, run_name))
+    print(f"TensorBoard logs will be saved to: {os.path.join(log_runs_dir, run_name)}")
 
     # 1. Initialize Tokenizer
-    if not os.path.exists(TOKENIZER_PATH):
-        print(f"Tokenizer config not found at {TOKENIZER_PATH}. Please run data preparation scripts first.")
-        return
-    tokenizer = FlowTokenizer(config_path=TOKENIZER_PATH)
+    tokenizer_path = data_params_yaml.get("tokenizer_path")
+    if not tokenizer_path or not os.path.exists(tokenizer_path):
+        print(f"ERROR: Tokenizer config not found at '{tokenizer_path}' (from data_config). Cannot proceed.")
+        writer.close(); return
+    tokenizer = FlowTokenizer(config_path=tokenizer_path)
     vocab_size = tokenizer.get_vocab_size()
-    pad_token_id = tokenizer.pad_token_id # Important for loss ignore_index
+    pad_token_id = tokenizer.pad_token_id
 
-    # 2. Initialize Model
-    model_config = FlowGPTConfig(
+    # 2. Initialize FULL Model from model_params_yaml
+    gpt_config = FlowGPTConfig(
         vocab_size=vocab_size, 
-        block_size=BLOCK_SIZE,
-        n_layer=N_LAYER, n_head=N_HEAD, n_embd=N_EMBD,
-        max_segment_types=MAX_SEGMENT_TYPES,
-        max_intra_line_positions=MAX_INTRA_LINE_POSITIONS,
-        dropout=DROPOUT
+        block_size=model_params_yaml["block_size"], # Required
+        n_layer=model_params_yaml["n_layer"],       # Required
+        n_head=model_params_yaml["n_head"],         # Required
+        n_embd=model_params_yaml["n_embd"],         # Required
+        max_segment_types=model_params_yaml["max_segment_types"], # Required
+        max_intra_line_positions=model_params_yaml["max_intra_line_positions"], # Required
+        dropout=model_params_yaml.get("dropout", 0.1), # Optional in YAML
+        bias=model_params_yaml.get("bias", True),      # Optional in YAML
+        pad_token_id=pad_token_id
     )
-    # Attach pad_token_id to config for the model to use in loss
-    model_config.pad_token_id = pad_token_id 
     
-    model = FlowTransformerDecoder(model_config).to(DEVICE)
-    print(f"Model initialized with {sum(p.numel() for p in model.parameters() if p.requires_grad):,} trainable parameters.")
+    model = FlowTransformerDecoder(gpt_config)
+    if COMPILE_MODEL:
+        print("Compiling the model...")
+        try:
+            model = torch.compile(model) 
+            print("Model compiled successfully.")
+        except Exception as e: # Catch generic exception from compile
+            print(f"Model compilation failed: {e}. Proceeding without compilation.")
+            
+    model.to(DEVICE)
+    print(f"FULL Model initialized with {sum(p.numel() for p in model.parameters() if p.requires_grad):,} trainable parameters.")
 
-    # 3. Load Data
-    train_dataset = FlowDataset(TRAIN_DATA_PATH, tokenizer, BLOCK_SIZE)
-    train_loader = DataLoader(train_dataset, batch_size=BATCH_SIZE, shuffle=True, num_workers=2, pin_memory=True if DEVICE=="cuda" else False)
+    # 3. Load FULL Data (paths from data_params_yaml)
+    # train_data_path should be tokenized_data_output_dir + train_data_filename from data_config_full
+    tokenized_data_output_dir = data_params_yaml.get("tokenized_data_output_dir")
+    train_data_filename = data_params_yaml.get("train_data_filename", "train_full.pt")
+    val_data_filename = data_params_yaml.get("val_data_filename", "val_full.pt")
+
+    if not tokenized_data_output_dir:
+        print(f"ERROR: 'tokenized_data_output_dir' not specified in {DATA_CONFIG_FULL_PATH}"); writer.close(); return
+        
+    train_data_path = os.path.join(tokenized_data_output_dir, train_data_filename)
+    val_data_path = os.path.join(tokenized_data_output_dir, val_data_filename)
+
+
+    if not os.path.exists(train_data_path):
+        print(f"ERROR: FULL training data not found at {train_data_path}.")
+        print(f"Please ensure 'scripts/05b_tokenize_data_full.py' has run successfully and paths in {DATA_CONFIG_FULL_PATH} are correct.")
+        writer.close(); return
+
+    train_dataset = FlowDataset(
+        data_file_path=train_data_path, 
+        tokenizer_pad_id=pad_token_id,
+        block_size=gpt_config.block_size # Use block_size from model config
+    )
+    # Consider num_workers based on CPU cores for DataLoader
+    num_dataloader_workers = min(os.cpu_count() // 2, 4) if os.cpu_count() else 0
+    train_loader = DataLoader(train_dataset, batch_size=batch_size, shuffle=True, 
+                              num_workers=num_dataloader_workers, pin_memory=(DEVICE=="cuda"))
     
     val_loader = None
-    if os.path.exists(VAL_DATA_PATH):
-        val_dataset = FlowDataset(VAL_DATA_PATH, tokenizer, BLOCK_SIZE)
-        val_loader = DataLoader(val_dataset, batch_size=BATCH_SIZE, num_workers=2)
+    if os.path.exists(val_data_path):
+        val_dataset = FlowDataset(
+            data_file_path=val_data_path, 
+            tokenizer_pad_id=pad_token_id, 
+            block_size=gpt_config.block_size
+        )
+        val_loader = DataLoader(val_dataset, batch_size=batch_size, num_workers=num_dataloader_workers, pin_memory=(DEVICE=="cuda"))
+    else:
+        print(f"Warning: FULL validation data path '{val_data_path}' not found. Proceeding without validation during training.")
 
     # 4. Optimizer and Scheduler
-    optimizer = optim.AdamW(model.parameters(), lr=LEARNING_RATE)
-    # scheduler = torch.optim.lr_scheduler.StepLR(optimizer, step_size=1, gamma=0.95) # Example
+    optimizer = optim.AdamW(model.parameters(), lr=learning_rate, weight_decay=weight_decay, betas=(0.9, 0.95)) # Common betas
+    
+    effective_steps_per_epoch = max(1, len(train_loader) // grad_accumulation_steps)
+    total_training_steps = effective_steps_per_epoch * epochs
+    scheduler = OneCycleLR(optimizer, max_lr=learning_rate,
+                           total_steps=total_training_steps,
+                           pct_start=0.1, # Percentage of steps for warmup
+                           anneal_strategy='cos') # Cosine annealing
+    
+    scaler = torch.cuda.amp.GradScaler() if USE_AMP else None
 
     # 5. Training Loop
     model.train()
-    step = 0
-    for epoch in range(EPOCHS):
-        print(f"\n--- Epoch {epoch+1}/{EPOCHS} ---")
-        epoch_loss = 0
-        optimizer.zero_grad() # Reset gradients at the start of each epoch / accumulation cycle
+    global_step = 0
+    total_training_time_seconds = 0.0
 
-        for i, batch in enumerate(tqdm(train_loader, desc=f"Epoch {epoch+1} Training")):
-            input_ids = batch["input_ids"].to(DEVICE)
-            target_ids = batch["target_ids"].to(DEVICE)
-            segment_ids = batch["segment_ids"].to(DEVICE)
-            intra_line_pos_ids = batch["intra_line_pos_ids"].to(DEVICE)
+    for epoch in range(epochs):
+        epoch_start_time = time.time()
+        epoch_train_loss = 0.0
+        
+        # tqdm progress bar for the epoch
+        progress_bar = tqdm(train_loader, desc=f"FULL Epoch {epoch+1}/{epochs} Training", leave=False)
+        
+        for i, batch in enumerate(progress_bar):
+            input_ids = batch["input_ids"].to(DEVICE, non_blocking=True)
+            target_ids = batch["target_ids"].to(DEVICE, non_blocking=True)
+            segment_ids = batch["segment_ids"].to(DEVICE, non_blocking=True)
+            intra_line_pos_ids = batch["intra_line_pos_ids"].to(DEVICE, non_blocking=True)
 
-            logits, loss = model(input_ids, segment_ids=segment_ids, intra_line_pos_ids=intra_line_pos_ids, targets=target_ids)
+            # Forward pass
+            if USE_AMP and scaler:
+                with torch.cuda.amp.autocast():
+                    logits, loss = model(input_ids, segment_ids=segment_ids, intra_line_pos_ids=intra_line_pos_ids, targets=target_ids)
+                if loss is not None: # Handle cases where loss might be None (e.g. if model internally handles it)
+                    loss_val = loss.item()
+                    loss_to_backward = loss / grad_accumulation_steps
+                    scaler.scale(loss_to_backward).backward()
+            else:
+                logits, loss = model(input_ids, segment_ids=segment_ids, intra_line_pos_ids=intra_line_pos_ids, targets=target_ids)
+                if loss is not None:
+                    loss_val = loss.item()
+                    loss_to_backward = loss / grad_accumulation_steps
+                    loss_to_backward.backward()
             
             if loss is not None:
-                loss = loss / GRAD_ACCUMULATION_STEPS # Normalize loss for accumulation
-                loss.backward()
-                epoch_loss += loss.item() * GRAD_ACCUMULATION_STEPS # Accumulate actual loss
+                epoch_train_loss += loss_val
 
-            if (i + 1) % GRAD_ACCUMULATION_STEPS == 0:
-                torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0) # Gradient clipping
-                optimizer.step()
-                optimizer.zero_grad()
-                step += 1
+            # Gradient accumulation
+            if (i + 1) % grad_accumulation_steps == 0 or (i + 1) == len(train_loader):
+                if USE_AMP and scaler:
+                    scaler.unscale_(optimizer) # Unscale before clipping
+                torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0) # Clip gradients
+                
+                if USE_AMP and scaler:
+                    scaler.step(optimizer)
+                    scaler.update()
+                else:
+                    optimizer.step()
+                
+                optimizer.zero_grad(set_to_none=True) # More memory efficient
+                scheduler.step() # Step scheduler after optimizer step
+                global_step += 1
 
-                if step % EVAL_INTERVAL == 0 and val_loader:
-                    evaluate(model, val_loader, DEVICE, pad_token_id)
-                    model.train() # Switch back to train mode
+                # Logging to TensorBoard (at each actual optimizer step)
+                if loss is not None:
+                    writer.add_scalar('FULL/Train/Loss_step', loss_val, global_step)
+                writer.add_scalar('FULL/Train/LearningRate', optimizer.param_groups[0]['lr'], global_step)
+                progress_bar.set_postfix(loss=f"{loss_val:.4f}", lr=f"{optimizer.param_groups[0]['lr']:.2e}")
 
-                if step % SAVE_INTERVAL == 0:
-                    save_checkpoint(model, optimizer, epoch, step, CHECKPOINT_DIR)
+
+                # Evaluation and Checkpointing (based on global_step)
+                if global_step > 0 and global_step % eval_interval_steps == 0 and val_loader:
+                    evaluate(model, val_loader, DEVICE, pad_token_id, USE_AMP, "FULL", writer, global_step) 
+                    model.train() # Ensure model is back in train mode
+
+                if global_step > 0 and global_step % save_interval_steps == 0:
+                    save_checkpoint(model, optimizer, epoch, global_step, scheduler, checkpoint_dir, filename=f"full_ckpt_step_{global_step}.pt", model_type="FULL")
         
-        avg_epoch_loss = epoch_loss / len(train_loader)
-        print(f"Epoch {epoch+1} finished. Average Training Loss: {avg_epoch_loss:.4f}")
-        # if scheduler: scheduler.step()
-
-        if val_loader: # Final validation for the epoch
-            evaluate(model, val_loader, DEVICE, pad_token_id)
+        # End of Epoch summary
+        epoch_duration = time.time() - epoch_start_time
+        total_training_time_seconds += epoch_duration
+        avg_epoch_train_loss = epoch_train_loss / max(1, len(train_loader))
+        print(f"FULL Epoch {epoch+1} finished. Avg Train Loss: {avg_epoch_train_loss:.4f}. Time: {epoch_duration:.2f}s. LR: {optimizer.param_groups[0]['lr']:.2e}")
+        writer.add_scalar('FULL/Train/Loss_epoch', avg_epoch_train_loss, epoch + 1)
+        
+        # End of epoch validation (optional, could be done less frequently)
+        if val_loader:
+            evaluate(model, val_loader, DEVICE, pad_token_id, USE_AMP, "FULL", writer, global_step) # Use global_step for x-axis
             model.train()
         
-        save_checkpoint(model, optimizer, epoch, step, CHECKPOINT_DIR, filename=f"checkpoint_epoch_{epoch+1}.pt")
+        # Save checkpoint at end of each epoch
+        save_checkpoint(model, optimizer, epoch + 1, global_step, scheduler, checkpoint_dir, filename=f"full_ckpt_epoch_{epoch+1}.pt", model_type="FULL")
 
-    print("Training complete.")
-    save_checkpoint(model, optimizer, EPOCHS, step, CHECKPOINT_DIR, filename="final_model.pt")
+    print(f"\nFULL training complete. Total time: {total_training_time_seconds/3600:.2f} hours.")
+    save_checkpoint(model, optimizer, epochs, global_step, scheduler, checkpoint_dir, filename="full_final_model.pt", model_type="FULL")
+    writer.close()
 
-def evaluate(model, val_loader, device, pad_token_id):
+
+def evaluate(model, val_loader, device, pad_token_id, use_amp, model_type_str, writer, current_global_step): 
     model.eval()
-    total_val_loss = 0
-    print("\nEvaluating on validation set...")
-    with torch.no_grad():
-        for batch in tqdm(val_loader, desc="Validation"):
-            input_ids = batch["input_ids"].to(device)
-            target_ids = batch["target_ids"].to(device)
-            segment_ids = batch["segment_ids"].to(device)
-            intra_line_pos_ids = batch["intra_line_pos_ids"].to(device)
-
-            _, loss = model(input_ids, segment_ids=segment_ids, intra_line_pos_ids=intra_line_pos_ids, targets=target_ids)
-            if loss is not None:
-                total_val_loss += loss.item()
+    total_val_loss = 0.0
+    num_batches = 0
+    print(f"\nEvaluating {model_type_str} model on validation set (step {current_global_step})...")
     
-    avg_val_loss = total_val_loss / len(val_loader)
-    print(f"Validation Loss: {avg_val_loss:.4f}, Perplexity: {torch.exp(torch.tensor(avg_val_loss)):.2f}")
+    progress_bar_val = tqdm(val_loader, desc=f"{model_type_str} Validation", leave=False)
+    with torch.no_grad():
+        for batch in progress_bar_val:
+            input_ids = batch["input_ids"].to(device, non_blocking=True)
+            target_ids = batch["target_ids"].to(device, non_blocking=True)
+            segment_ids = batch["segment_ids"].to(device, non_blocking=True)
+            intra_line_pos_ids = batch["intra_line_pos_ids"].to(device, non_blocking=True)
+
+            loss_val_item = 0.0
+            if use_amp:
+                with torch.cuda.amp.autocast():
+                    _, loss = model(input_ids, segment_ids=segment_ids, intra_line_pos_ids=intra_line_pos_ids, targets=target_ids)
+            else:
+                 _, loss = model(input_ids, segment_ids=segment_ids, intra_line_pos_ids=intra_line_pos_ids, targets=target_ids)
+            
+            if loss is not None:
+                loss_val_item = loss.item()
+                total_val_loss += loss_val_item
+            num_batches += 1
+            progress_bar_val.set_postfix(val_loss_batch=f"{loss_val_item:.4f}")
+    
+    avg_val_loss = total_val_loss / max(1, num_batches) 
+    perplexity_val = torch.exp(torch.tensor(avg_val_loss)) if avg_val_loss > 0 and num_batches > 0 else float('inf')
+    print(f"{model_type_str} Validation Summary: Avg Loss: {avg_val_loss:.4f}, Perplexity: {perplexity_val:.2f}")
+
+    writer.add_scalar(f'{model_type_str}/Val/Loss', avg_val_loss, current_global_step)
+    writer.add_scalar(f'{model_type_str}/Val/Perplexity', perplexity_val, current_global_step)
     return avg_val_loss
 
-def save_checkpoint(model, optimizer, epoch, step, checkpoint_dir, filename=None):
+def save_checkpoint(model, optimizer, epoch, step, scheduler, checkpoint_dir, filename=None, model_type="Model"): 
     if filename is None:
-        filename = f"checkpoint_step_{step}.pt"
+        filename = f"{model_type.lower()}_ckpt_epoch_{epoch}_step_{step}.pt"
+    
+    # Ensure the specific model type's checkpoint subdirectory exists (e.g., data/checkpoints/flow_model_full/)
+    # The `checkpoint_dir` passed should already be the correct one.
+    os.makedirs(checkpoint_dir, exist_ok=True) 
     checkpoint_path = os.path.join(checkpoint_dir, filename)
-    torch.save({
+    
+    # Handle compiled model: save original model's state_dict
+    model_to_save = model._orig_mod if hasattr(model, '_orig_mod') and isinstance(model._orig_mod, nn.Module) else model
+
+    checkpoint_data = {
         'epoch': epoch,
         'step': step,
-        'model_state_dict': model.state_dict(),
+        'model_state_dict': model_to_save.state_dict(),
         'optimizer_state_dict': optimizer.state_dict(),
-        'config': model.config # Save model config
-    }, checkpoint_path)
-    print(f"Checkpoint saved to {checkpoint_path}")
+        'config': model_to_save.config if hasattr(model_to_save, 'config') else None # Save model config
+    }
+    if scheduler:
+        checkpoint_data['scheduler_state_dict'] = scheduler.state_dict()
+    
+    try:
+        torch.save(checkpoint_data, checkpoint_path)
+        print(f"{model_type} Checkpoint saved to {checkpoint_path}")
+    except Exception as e:
+        print(f"ERROR saving checkpoint to {checkpoint_path}: {e}")
 
 if __name__ == "__main__":
-    train()
+    train_full_model()
