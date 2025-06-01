@@ -20,6 +20,8 @@ class BarBeatFeatures(TypedDict):
     snare_events: List[int]
     hihat_events: List[int]
     bass_events: List[int]    # Onsets of bass notes, quantized
+    bar_start_time_sec: Optional[float] 
+    bar_duration_sec: Optional[float]
 
 SongBeatFeatures = List[BarBeatFeatures]
 
@@ -31,6 +33,14 @@ class WordTiming(TypedDict):
 
 LyricsData = List[WordTiming] # A list of timed words
 
+# Syllable Detail for internal processing before FlowDatum creation
+class SyllableDetail(TypedDict):
+    syllable_text: str
+    start_time: float
+    end_time: float
+    stress: Optional[int] # 0: none/unstressed, 1: primary, 2: secondary (optional)
+
+
 # Flow Data Extractor Related
 class FlowDatum(TypedDict):
     bar_index: int             # Index of the bar this flow line belongs to
@@ -38,16 +48,19 @@ class FlowDatum(TypedDict):
     syllables: int             # Total syllables in the line
     start_offset_beats: float  # Start of the line relative to bar start, in beats
     duration_beats: float      # Duration of the line, in beats
-    syllable_start_subdivisions: List[int] # List of 0-indexed subdivisions (e.g., 0-15)
-                                          # within the bar where syllables of this line start.
+    
+    syllable_start_subdivisions: List[int] 
+    syllable_durations_quantized: List[int] 
+    syllable_stresses: List[int] # NEW: Stress marker for each syllable (e.g., 0, 1, 2)
+                                 # same length as syllable_start_subdivisions.
 
 FlowData = List[FlowDatum] # A sequence of flow data for a song or section
 
 # For combining features and targets for training
 class TrainingInstance(TypedDict):
-    song_id: str
+    song_name: str 
     beat_features: SongBeatFeatures
-    flow_targets: FlowData
+    flow_data: FlowData 
 
 # Placeholder for more complex phoneme info if needed later
 class PhonemeInfo(TypedDict):

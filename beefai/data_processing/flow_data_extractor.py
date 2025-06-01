@@ -1,405 +1,430 @@
+
 import numpy as np
 from typing import List, Dict, Tuple, Optional, Any
-from beefai.utils.data_types import FlowDatum, FlowData, SongBeatFeatures, LyricsData, BarBeatFeatures, WordTiming
+from beefai.utils.data_types import FlowDatum, FlowData, SongBeatFeatures, LyricsData, BarBeatFeatures, WordTiming, SyllableDetail
 from beefai.data_processing.text_processor import TextProcessor
 import os
 import json
-import librosa 
+
+DEBUG_FLOW_EXTRACTOR = True # Keep this for user control
+LOG_PREFIX_FDE = "[FDE]" # For new, non-debug logs
+
+# Duration bins from FlowDataExtractor (for quantizing syllable durations)
+SYLLABLE_DURATION_BINS_SEC_FDE = [0.05, 0.1, 0.15, 0.2, 0.25, 0.3, 0.4, 0.5, 0.6, 0.75, 1.0, 1.5] 
+
 
 def parse_whisper_timestamped_json(json_file_path: str) -> Optional[LyricsData]:
-    """
-    Parses a JSON file output by whisper-timestamped to get word alignments.
-    Filters out silence or short pause markers if present (though whisper-timestamped usually gives words).
-    """
+    # This function already has good DEBUG_FLOW_EXTRACTOR prints.
+    if DEBUG_FLOW_EXTRACTOR: print(f"{LOG_PREFIX_FDE} DEBUG: parse_whisper: Attempting to parse {json_file_path}", flush=True)
     if not os.path.exists(json_file_path):
-        print(f"FlowDataExtractor: Whisper-timestamped JSON file not found: {json_file_path}")
+        if DEBUG_FLOW_EXTRACTOR: print(f"{LOG_PREFIX_FDE} DEBUG: parse_whisper: File not found: {json_file_path}", flush=True)
         return None
     try:
         with open(json_file_path, 'r', encoding='utf-8') as f:
             data = json.load(f)
     except Exception as e:
-        print(f"FlowDataExtractor: Error reading whisper-timestamped JSON file {json_file_path}: {e}")
+        if DEBUG_FLOW_EXTRACTOR: print(f"{LOG_PREFIX_FDE} DEBUG: parse_whisper: Error reading JSON {json_file_path}: {e}", flush=True)
         return None
 
     word_alignments: LyricsData = []
-    
     if "segments" not in data or not isinstance(data["segments"], list):
-        print(f"FlowDataExtractor: JSON file {json_file_path} does not have the expected 'segments' list structure.")
+        if DEBUG_FLOW_EXTRACTOR: print(f"{LOG_PREFIX_FDE} DEBUG: parse_whisper: JSON {json_file_path} lacks 'segments' list.", flush=True)
         return None
 
-    for segment in data["segments"]:
+    total_words_in_file = 0
+    parsed_words_count = 0
+    for segment_idx, segment in enumerate(data["segments"]):
         if "words" not in segment or not isinstance(segment["words"], list):
+            if DEBUG_FLOW_EXTRACTOR: print(f"{LOG_PREFIX_FDE} DEBUG: parse_whisper: Segment {segment_idx} in {json_file_path} lacks 'words' list.", flush=True)
             continue 
-
-        for word_info in segment["words"]:
-            if not all(k in word_info for k in ["text", "start", "end"]):
+        total_words_in_file += len(segment["words"])
+        for word_idx, word_info in enumerate(segment["words"]):
+            if not isinstance(word_info, dict) or not all(k in word_info for k in ["text", "start", "end"]):
+                if DEBUG_FLOW_EXTRACTOR: print(f"{LOG_PREFIX_FDE} DEBUG: parse_whisper: Segment {segment_idx}, Word {word_idx} in {json_file_path} is malformed: {word_info}", flush=True)
                 continue
-
-            word_text = word_info["text"].strip().lower()
-            if word_text and word_text not in ["", "[Music]", "[ Silence ]", "(Music)", "(Silence)"]: 
-                word_alignments.append({
-                    "word": word_text,
-                    "start_time": round(float(word_info["start"]), 4),
-                    "end_time": round(float(word_info["end"]), 4)
-                })
+            word_text = str(word_info["text"]).strip().lower() 
+            ignore_texts = ["", "[music]", "[silence]", "(music)", "(silence)", "[ موسیقی ]", "[ سکوت ]", "[موسيقى]", "[صمت]"]
+            if word_text and word_text not in ignore_texts: 
+                try:
+                    start_time = float(word_info["start"])
+                    end_time = float(word_info["end"])
+                    if start_time > end_time + 1e-3: 
+                         if DEBUG_FLOW_EXTRACTOR: print(f"{LOG_PREFIX_FDE} DEBUG: parse_whisper: Segment {segment_idx}, Word {word_idx} has start_time > end_time: {word_info}", flush=True)
+                         continue
+                    end_time = max(start_time, end_time) 
+                    word_alignments.append({
+                        "word": word_text,
+                        "start_time": round(start_time, 4),
+                        "end_time": round(end_time, 4)
+                    })
+                    parsed_words_count +=1
+                except (ValueError, TypeError) as e:
+                    if DEBUG_FLOW_EXTRACTOR: print(f"{LOG_PREFIX_FDE} DEBUG: parse_whisper: Segment {segment_idx}, Word {word_idx} has invalid time: {word_info}, error: {e}", flush=True)
+                    continue
     
-    if not word_alignments:
-        print(f"FlowDataExtractor: No valid word alignments extracted from {json_file_path}.")
-        return None
-            
-    return word_alignments
+    if DEBUG_FLOW_EXTRACTOR: print(f"{LOG_PREFIX_FDE} DEBUG: parse_whisper: From {json_file_path}, total words in JSON: {total_words_in_file}, successfully parsed and kept: {parsed_words_count}", flush=True)
+    return word_alignments if word_alignments else None
 
 
 class FlowDataExtractor:
     def __init__(self, 
-                 sample_rate_for_acapella: int = 44100, # Only if loading acapella audio directly
-                 subdivisions_per_bar: int = 16 # For syllable landing pattern
+                 sample_rate_for_acapella: int = 44100, 
+                 subdivisions_per_bar: int = 16 
                 ): 
-        self.sample_rate = sample_rate_for_acapella
+        self.sample_rate = sample_rate_for_acapella 
         self.text_processor = TextProcessor() 
         self.subdivisions_per_bar = subdivisions_per_bar
+        # This initial print is fine.
+        # if DEBUG_FLOW_EXTRACTOR: print(f"{LOG_PREFIX_FDE} DEBUG: FlowDataExtractor initialized. Subdivisions per bar: {self.subdivisions_per_bar}", flush=True)
 
-    def _estimate_syllable_timings_for_word(self, word_data: WordTiming) -> List[Dict[str, Any]]:
+    def _estimate_syllable_details_for_word(self, word_data: WordTiming) -> List[SyllableDetail]:
         """
-        Estimates start and end times for each syllable in a word.
-        A simple approach: divides word duration equally among its syllables.
-        More advanced: could use pyphen's syllable segmentation and distribute time by syllable length.
+        Estimates start times, end times, and stress for each syllable within a word.
+        Returns: List of SyllableDetail dicts.
         """
-        syllable_timings: List[Dict[str, Any]] = []
+        syllable_details_list: List[SyllableDetail] = []
         word_text = word_data["word"]
         word_start_time = word_data["start_time"]
         word_end_time = word_data["end_time"]
         
-        syllables_list = self.text_processor.get_syllables_from_word(word_text)
-        num_syllables = len(syllables_list)
+        syllables_with_stress_info = self.text_processor.get_syllables_with_stress(word_text)
+        num_syllables = len(syllables_with_stress_info)
 
-        if num_syllables == 0:
-            return []
+        if num_syllables == 0: return [] 
 
         word_duration = word_end_time - word_start_time
-        if word_duration <= 0: # If word has no duration, assign all syllables to word_start_time
-            for syl_text in syllables_list:
-                syllable_timings.append({
-                    "syllable_text": syl_text,
-                    "start_time": word_start_time,
-                    "end_time": word_start_time
+        if word_duration < 0: word_duration = 0 
+
+        current_syllable_start_time = word_start_time
+        min_syl_dur = 0.001 
+
+        if word_duration == 0:
+            for syl_text, stress_val in syllables_with_stress_info:
+                syllable_details_list.append({
+                    "syllable_text": syl_text, 
+                    "start_time": word_start_time, 
+                    "end_time": word_end_time,
+                    "stress": stress_val
                 })
-            return syllable_timings
+            return syllable_details_list
 
         avg_syllable_duration = word_duration / num_syllables
-        current_syllable_start_time = word_start_time
 
-        for i, syl_text in enumerate(syllables_list):
+        for i, (syl_text, stress_val) in enumerate(syllables_with_stress_info):
             syl_start = current_syllable_start_time
-            syl_end = current_syllable_start_time + avg_syllable_duration
-            # Ensure last syllable ends exactly at word_end_time
-            if i == num_syllables - 1:
+            if i == num_syllables - 1: 
                 syl_end = word_end_time
+            else:
+                syl_end = current_syllable_start_time + avg_syllable_duration
             
-            syllable_timings.append({
-                "syllable_text": syl_text,
-                "start_time": round(syl_start, 4),
-                "end_time": round(syl_end, 4)
+            syl_end = max(syl_start + min_syl_dur, syl_end)
+            syl_end = min(syl_end, word_end_time)
+
+            syllable_details_list.append({
+                "syllable_text": syl_text, 
+                "start_time": round(syl_start, 4), 
+                "end_time": round(syl_end, 4),
+                "stress": stress_val
             })
-            current_syllable_start_time = syl_end
-            
-        return syllable_timings
+            current_syllable_start_time = syl_end 
+            if current_syllable_start_time >= word_end_time and i < num_syllables -1:
+                current_syllable_start_time = word_end_time 
+        return syllable_details_list
 
-    def _segment_words_into_lines(self, 
+    def _segment_words_into_phrases(self, 
                                   word_alignments: LyricsData,
-                                  max_pause_sec_between_words_in_line: float = 0.35, 
-                                  min_pause_sec_for_line_break: float = 0.5,       
-                                  min_words_per_line: int = 2,
-                                  max_words_per_line: int = 20 
+                                  max_pause_sec_between_words_in_phrase: float = 0.35, 
+                                  min_pause_sec_for_phrase_break: float = 0.5,       
+                                  min_words_per_phrase: int = 1, 
+                                  max_words_per_phrase: int = 30 
                                  ) -> List[List[WordTiming]]: 
-        if not word_alignments:
-            return []
-
-        lines_of_words: List[List[WordTiming]] = []
-        current_line_words: List[WordTiming] = []
+        if not word_alignments: return []
+        phrases_of_words: List[List[WordTiming]] = []
+        current_phrase_words: List[WordTiming] = []
         
         for i, word_data in enumerate(word_alignments):
-            if not current_line_words: 
-                current_line_words.append(word_data)
+            if not current_phrase_words: 
+                current_phrase_words.append(word_data)
             else:
-                prev_word_end_time = current_line_words[-1]["end_time"]
+                prev_word_end_time = current_phrase_words[-1]["end_time"]
                 current_word_start_time = word_data["start_time"]
                 pause_duration = current_word_start_time - prev_word_end_time
 
-                if pause_duration >= min_pause_sec_for_line_break or \
-                   len(current_line_words) >= max_words_per_line:
-                    if len(current_line_words) >= min_words_per_line:
-                        lines_of_words.append(list(current_line_words))
-                    current_line_words = [word_data] 
-                elif pause_duration < max_pause_sec_between_words_in_line:
-                    current_line_words.append(word_data) 
+                if pause_duration >= min_pause_sec_for_phrase_break or \
+                   len(current_phrase_words) >= max_words_per_phrase:
+                    if len(current_phrase_words) >= min_words_per_phrase:
+                        phrases_of_words.append(list(current_phrase_words))
+                    current_phrase_words = [word_data] 
+                elif pause_duration < max_pause_sec_between_words_in_phrase: 
+                    current_phrase_words.append(word_data) 
                 else: 
-                    if len(current_line_words) >= min_words_per_line:
-                        lines_of_words.append(list(current_line_words))
-                    current_line_words = [word_data]
+                    if len(current_phrase_words) >= min_words_per_phrase:
+                        phrases_of_words.append(list(current_phrase_words))
+                    current_phrase_words = [word_data]
             
-            if i == len(word_alignments) - 1:
-                if current_line_words and (not lines_of_words or (lines_of_words and current_line_words != lines_of_words[-1])): 
-                    if len(current_line_words) >= min_words_per_line or not lines_of_words : 
-                        lines_of_words.append(list(current_line_words))
-                    elif lines_of_words: 
-                        lines_of_words[-1].extend(current_line_words)
+        if current_phrase_words:
+            if len(current_phrase_words) >= min_words_per_phrase:
+                phrases_of_words.append(list(current_phrase_words))
+            elif phrases_of_words: 
+                phrases_of_words[-1].extend(current_phrase_words)
+        if DEBUG_FLOW_EXTRACTOR: print(f"{LOG_PREFIX_FDE} DEBUG _segment_words_into_phrases: Segmented into {len(phrases_of_words)} phrases.", flush=True)
+        return phrases_of_words
 
-        if current_line_words and (not lines_of_words or current_line_words != lines_of_words[-1]):
-             if len(current_line_words) >= min_words_per_line :
-                lines_of_words.append(list(current_line_words))
-             elif lines_of_words: 
-                lines_of_words[-1].extend(current_line_words)
+    def _quantize_duration_to_bin_fde(self, duration_sec: float) -> int:
+        """Quantizes duration in seconds to a bin index using SYLLABLE_DURATION_BINS_SEC_FDE."""
+        for idx, upper_edge_s in enumerate(SYLLABLE_DURATION_BINS_SEC_FDE):
+            if duration_sec <= upper_edge_s:
+                return idx
+        return len(SYLLABLE_DURATION_BINS_SEC_FDE) 
 
-        return lines_of_words
-
-    def _create_flow_datum_from_line(self, 
-                                     line_words: List[WordTiming], 
-                                     bar_info_for_line: BarBeatFeatures, 
-                                     all_song_beat_features: SongBeatFeatures, 
+    def _create_flow_datum_for_bar_segment(self, 
+                                     words_in_bar_segment: List[WordTiming], 
+                                     target_bar_info: BarBeatFeatures, 
+                                     target_bar_abs_start_time_sec: float, 
                                      line_idx_in_bar: int 
                                      ) -> Optional[FlowDatum]:
-        if not line_words: return None
+        if not words_in_bar_segment: return None
         
-        line_actual_start_time_sec = line_words[0]["start_time"]
-        line_actual_end_time_sec = line_words[-1]["end_time"]
+        all_syllables_details_for_line: List[SyllableDetail] = []
+        for word_detail in words_in_bar_segment:
+            all_syllables_details_for_line.extend(self._estimate_syllable_details_for_word(word_detail))
+
+        if not all_syllables_details_for_line: return None
+        total_syllables_in_segment = len(all_syllables_details_for_line)
+
+        segment_actual_start_time_sec = all_syllables_details_for_line[0]["start_time"]
+        segment_actual_end_time_sec = all_syllables_details_for_line[-1]["end_time"]
         
-        total_syllables_in_line = sum(self.text_processor.count_syllables_in_word(wd["word"]) for wd in line_words)
-        if total_syllables_in_line == 0: return None 
-
-        current_bar_abs_start_time_sec = 0.0
-        found_bar_start = False
-        _bar_starts_map = {} 
-
-        if not _bar_starts_map: 
-            temp_bar_time = 0.0
-            for bf_idx, bf in enumerate(all_song_beat_features):
-                _bar_starts_map[bf["bar_index"]] = temp_bar_time
-                if bf["bpm"] > 0:
-                    beat_dur = 60.0 / bf["bpm"]
-                    bar_dur = bf["time_signature"][0] * beat_dur
-                    temp_bar_time += bar_dur
-                else: 
-                    temp_bar_time += 2.0
-
-        target_bar_index = bar_info_for_line["bar_index"]
-        if target_bar_index in _bar_starts_map:
-            current_bar_abs_start_time_sec = _bar_starts_map[target_bar_index]
-            found_bar_start = True
+        target_bar_index = target_bar_info["bar_index"]
+        bpm_of_bar = target_bar_info.get("bpm", 0.0)
+        if bpm_of_bar <= 0: return None
         
-        if not found_bar_start:
-            print(f"Error: Could not determine absolute start time for bar_index {target_bar_index}. Skipping line.")
-            return None
-
-        bpm_of_bar = bar_info_for_line["bpm"]
-        if bpm_of_bar <= 0: 
-            print(f"Warning: Bar {target_bar_index} has BPM <=0. Cannot calculate beat-relative timings. Skipping.")
-            return None
-        
-        beats_in_current_bar = bar_info_for_line["time_signature"][0]
+        beats_in_target_bar = target_bar_info.get("time_signature", (4,4))[0]
         beat_duration_sec = 60.0 / bpm_of_bar
-        bar_duration_sec = beats_in_current_bar * beat_duration_sec
-        if bar_duration_sec <= 0.01: # Avoid division by zero if bar duration is negligible
-            print(f"Warning: Bar {target_bar_index} has near-zero duration. Skipping line.")
-            return None
-        subdivision_duration_sec = bar_duration_sec / self.subdivisions_per_bar
-
-
-        start_offset_beats = (line_actual_start_time_sec - current_bar_abs_start_time_sec) / beat_duration_sec
-        duration_beats = (line_actual_end_time_sec - line_actual_start_time_sec) / beat_duration_sec
         
-        start_offset_beats = np.clip(start_offset_beats, -1.0, beats_in_current_bar + 1.0) 
-        duration_beats = max(0.1, duration_beats) 
+        bar_duration_sec = target_bar_info.get("bar_duration_sec", beats_in_target_bar * beat_duration_sec)
+        if bar_duration_sec <= 1e-6: return None
 
-        # Calculate syllable landing pattern
+        start_offset_beats = (segment_actual_start_time_sec - target_bar_abs_start_time_sec) / beat_duration_sec
+        duration_beats = (segment_actual_end_time_sec - segment_actual_start_time_sec) / beat_duration_sec
+        
+        start_offset_beats = np.clip(start_offset_beats, -0.5 * beats_in_target_bar, 1.5 * beats_in_target_bar) 
+        duration_beats = np.clip(duration_beats, 0.05, 2.0 * beats_in_target_bar) 
+
         syllable_start_subdivisions: List[int] = []
-        for word_detail in line_words:
-            syllables_in_word = self._estimate_syllable_timings_for_word(word_detail)
-            for syl_timing in syllables_in_word:
-                syl_abs_start_time = syl_timing["start_time"]
-                # Time of syllable relative to the start of its assigned bar
-                syl_time_in_bar = syl_abs_start_time - current_bar_abs_start_time_sec
-                
-                # Quantize to subdivision index
-                # Allow syllables to land slightly before bar start (pickup) or slightly after bar end
-                # by not strictly clipping syl_time_in_bar to [0, bar_duration_sec] before normalization.
-                # The subdivision_index will be clipped later.
-                normalized_time_in_bar = syl_time_in_bar / bar_duration_sec
-                subdivision_index = int(normalized_time_in_bar * self.subdivisions_per_bar)
-                
-                # Clip to valid range [0, self.subdivisions_per_bar - 1]
-                subdivision_index = max(0, min(subdivision_index, self.subdivisions_per_bar - 1))
-                syllable_start_subdivisions.append(subdivision_index)
+        syllable_durations_quantized_indices: List[int] = []
+        syllable_stress_values: List[int] = []
         
-        # Remove duplicates and sort, as multiple syllables might land in the same subdivision
-        # or if we want to preserve all landings, don't make it a set.
-        # For now, let's keep all, as it represents a sequence of onsets.
-        # If the tokenizer expects unique positions, this needs adjustment.
-        # The current plan for tokenizer is a sequence of [SYLLABLE_STARTS_SUBDIV_X] tokens,
-        # so duplicates are fine and represent multiple syllables hitting that subdivision.
-        # Sorting might be good for canonical representation if order doesn't matter for the token list.
-        # For now, keep chronological order.
+        subdivision_duration_sec = bar_duration_sec / self.subdivisions_per_bar
+        if subdivision_duration_sec < 1e-6 : subdivision_duration_sec = 1e-6 
 
+        for syl_detail in all_syllables_details_for_line:
+            syl_abs_start_time = syl_detail["start_time"]
+            syl_abs_end_time = syl_detail["end_time"]
+            syl_stress = syl_detail.get("stress", 0) 
+
+            syl_time_relative_to_target_bar_start_sec = syl_abs_start_time - target_bar_abs_start_time_sec
+            subdivision_index_float = syl_time_relative_to_target_bar_start_sec / subdivision_duration_sec
+            subdivision_index = int(round(subdivision_index_float)) 
+            subdivision_index = max(0, min(subdivision_index, self.subdivisions_per_bar - 1))
+            syllable_start_subdivisions.append(subdivision_index)
+
+            syl_duration_raw_sec = syl_abs_end_time - syl_abs_start_time
+            quantized_dur_idx = self._quantize_duration_to_bin_fde(syl_duration_raw_sec)
+            syllable_durations_quantized_indices.append(quantized_dur_idx)
+            syllable_stress_values.append(syl_stress)
+        
+        if DEBUG_FLOW_EXTRACTOR:
+            line_text_for_debug = "".join(s['syllable_text'] for s in all_syllables_details_for_line[:10]) 
+            print(f"{LOG_PREFIX_FDE} DEBUG _create_flow_datum: Bar {target_bar_index}, LineInBar {line_idx_in_bar}, SylText: '{line_text_for_debug}...' ({total_syllables_in_segment} syls)", flush=True)
+            # print(f"    Syls: {total_syllables_in_segment}, Offset: {start_offset_beats:.2f}b, Dur: {duration_beats:.2f}b", flush=True)
+            # print(f"    Subdivs: {syllable_start_subdivisions}", flush=True)
+            # print(f"    QuantSylDurs_FDE: {syllable_durations_quantized_indices}", flush=True)
+            # print(f"    SylStresses: {syllable_stress_values}", flush=True)
+        
         return {
             "bar_index": target_bar_index, 
             "line_index_in_bar": line_idx_in_bar, 
-            "syllables": total_syllables_in_line,
+            "syllables": total_syllables_in_segment,
             "start_offset_beats": round(start_offset_beats, 3),
             "duration_beats": round(duration_beats, 3),
-            "syllable_start_subdivisions": syllable_start_subdivisions 
+            "syllable_start_subdivisions": syllable_start_subdivisions,
+            "syllable_durations_quantized": syllable_durations_quantized_indices,
+            "syllable_stresses": syllable_stress_values
         }
 
     def extract_flow_for_song(self, 
                               alignment_data_path: str, 
                               song_beat_features: SongBeatFeatures 
                              ) -> Optional[FlowData]:
+        song_basename = os.path.basename(alignment_data_path).replace('.json', '')
+        print(f"{LOG_PREFIX_FDE} [{song_basename}] Starting flow extraction for: {alignment_data_path}", flush=True)
+        
+        if DEBUG_FLOW_EXTRACTOR: print(f"\n{LOG_PREFIX_FDE} DEBUG extract_flow_for_song: Processing {alignment_data_path}", flush=True)
+        
         word_alignments = parse_whisper_timestamped_json(alignment_data_path)
-        if not word_alignments:
-            print(f"FlowDataExtractor: Failed to get word alignments from {alignment_data_path}.")
+        if not word_alignments: 
+            print(f"{LOG_PREFIX_FDE} [{song_basename}] No word alignments parsed from {alignment_data_path}. Cannot extract flow.", flush=True)
+            return None 
+        if not song_beat_features: 
+            print(f"{LOG_PREFIX_FDE} [{song_basename}] No song beat features provided. Cannot extract flow.", flush=True)
             return None
-        if not song_beat_features:
-            print(f"FlowDataExtractor: Missing song_beat_features. Cannot process flow.")
-            return None
+        print(f"{LOG_PREFIX_FDE} [{song_basename}] Parsed {len(word_alignments)} word alignments.", flush=True)
 
-        lines_of_words = self._segment_words_into_lines(word_alignments)
-        if not lines_of_words:
-            print("FlowDataExtractor: No lines segmented from word alignments.")
+        phrases_of_words = self._segment_words_into_phrases(word_alignments)
+        if not phrases_of_words: 
+            print(f"{LOG_PREFIX_FDE} [{song_basename}] Could not segment words into phrases.", flush=True)
             return None
+        print(f"{LOG_PREFIX_FDE} [{song_basename}] Segmented into {len(phrases_of_words)} phrases.", flush=True)
 
         all_flow_data: FlowData = []
         
         bar_absolute_start_times: Dict[int, float] = {}
-        current_abs_time = 0.0
-        for bar_feat in song_beat_features:
-            bar_absolute_start_times[bar_feat["bar_index"]] = current_abs_time
-            if bar_feat["bpm"] > 0:
-                beat_dur = 60.0 / bar_feat["bpm"]
-                bar_duration_sec = bar_feat["time_signature"][0] * beat_dur
-                current_abs_time += bar_duration_sec
-            else: 
-                current_abs_time += 2.0
+        bar_durations_map: Dict[int, float] = {} 
+        has_abs_bar_start_times_in_sbf = all(isinstance(bf,dict) and "bar_start_time_sec" in bf and "bar_duration_sec" in bf for bf in song_beat_features)
 
-        bar_line_counters: Dict[int, int] = {bf["bar_index"]: 0 for bf in song_beat_features}
-
-        for line_ws in lines_of_words:
-            if not line_ws: continue
-            line_actual_start_time = line_ws[0]["start_time"]
-            
-            assigned_bar_idx = -1
-            min_positive_offset_to_bar_start = float('inf')
-            closest_bar_for_pickup = -1
-            
-            for bf in song_beat_features:
-                bar_idx = bf["bar_index"]
-                bar_start_t = bar_absolute_start_times.get(bar_idx, -1)
-                if bar_start_t < 0: continue 
-
-                offset_to_bar = line_actual_start_time - bar_start_t
-                
-                if offset_to_bar >= 0: 
-                    if offset_to_bar < min_positive_offset_to_bar_start:
-                        min_positive_offset_to_bar_start = offset_to_bar
-                        assigned_bar_idx = bar_idx
-                elif closest_bar_for_pickup == -1 or abs(offset_to_bar) < abs(line_actual_start_time - bar_absolute_start_times.get(closest_bar_for_pickup, float('inf'))):
-                     closest_bar_for_pickup = bar_idx
-
-            if assigned_bar_idx == -1: 
-                if closest_bar_for_pickup != -1: 
-                    assigned_bar_idx = closest_bar_for_pickup
-                elif song_beat_features : 
-                    assigned_bar_idx = song_beat_features[0]["bar_index"]
+        if not has_abs_bar_start_times_in_sbf:
+            if DEBUG_FLOW_EXTRACTOR: print(f"{LOG_PREFIX_FDE} DEBUG [{song_basename}] 'bar_start_time_sec' or 'bar_duration_sec' missing in SBF, re-calculating.", flush=True)
+            current_calc_abs_time = 0.0
+            for bar_feat_idx, bar_feat in enumerate(song_beat_features):
+                if not isinstance(bar_feat, dict): continue
+                bar_idx_key = bar_feat.get("bar_index", bar_feat_idx) 
+                bar_absolute_start_times[bar_idx_key] = current_calc_abs_time
+                bpm = bar_feat.get("bpm", 120.0) 
+                time_sig_num = bar_feat.get("time_signature", (4,4))[0]
+                bar_dur_calc = 0.0
+                if bpm > 0 and time_sig_num > 0:
+                    beat_dur = 60.0 / bpm
+                    bar_dur_calc = time_sig_num * beat_dur
                 else: 
-                    print(f"FlowDataExtractor: Cannot assign bar for line starting at {line_actual_start_time:.2f}s (no bar info). Skipping.")
-                    continue
-            
-            bar_info_for_this_line = next((bf for bf in song_beat_features if bf["bar_index"] == assigned_bar_idx), None)
-            if not bar_info_for_this_line:
-                print(f"FlowDataExtractor: Could not retrieve bar_info for assigned_bar_idx {assigned_bar_idx}. Skipping.")
-                continue
-                
-            line_idx_in_assigned_bar = bar_line_counters.get(assigned_bar_idx, 0)
-            flow_datum = self._create_flow_datum_from_line(line_ws, bar_info_for_this_line, song_beat_features, line_idx_in_assigned_bar)
-            
-            if flow_datum:
-                all_flow_data.append(flow_datum)
-                bar_line_counters[assigned_bar_idx] = line_idx_in_assigned_bar + 1
+                    bar_dur_calc = 2.0 
+                bar_durations_map[bar_idx_key] = bar_dur_calc
+                current_calc_abs_time += bar_dur_calc
+        else:
+            for bar_feat in song_beat_features:
+                 if isinstance(bar_feat, dict):
+                    bar_absolute_start_times[bar_feat["bar_index"]] = bar_feat["bar_start_time_sec"]
+                    bar_durations_map[bar_feat["bar_index"]] = bar_feat["bar_duration_sec"]
         
-        print(f"FlowDataExtractor: Extracted {len(all_flow_data)} flow segments (lines) from {alignment_data_path}.")
-        return all_flow_data
+        # if DEBUG_FLOW_EXTRACTOR: print(f"{LOG_PREFIX_FDE} DEBUG [{song_basename}] Bar absolute_start_times: {bar_absolute_start_times}", flush=True)
+        # if DEBUG_FLOW_EXTRACTOR: print(f"{LOG_PREFIX_FDE} DEBUG [{song_basename}] Bar durations_map: {bar_durations_map}", flush=True)
+
+        bar_line_counters: Dict[int, int] = {idx: 0 for idx in bar_absolute_start_times.keys()}
+
+        for phrase_idx, phrase_words in enumerate(phrases_of_words):
+            if not phrase_words: continue
+            if DEBUG_FLOW_EXTRACTOR: print(f"{LOG_PREFIX_FDE} DEBUG [{song_basename}] Processing Phrase {phrase_idx+1}/{len(phrases_of_words)}, words: {' '.join(w['word'] for w in phrase_words[:4])}...", flush=True)
+
+            current_word_idx_in_phrase = 0
+            while current_word_idx_in_phrase < len(phrase_words):
+                first_word_of_segment = phrase_words[current_word_idx_in_phrase]
+                assigned_bar_idx_for_segment = -1
+                min_offset_to_bar_start = float('inf')
+
+                for bar_idx_cand, bar_start_abs_time_cand in bar_absolute_start_times.items():
+                    offset = first_word_of_segment["start_time"] - bar_start_abs_time_cand
+                    bar_dur_cand = bar_durations_map.get(bar_idx_cand, 2.0) 
+                    if offset >= - (bar_dur_cand / 2.0) : 
+                        if offset < min_offset_to_bar_start : 
+                            min_offset_to_bar_start = offset
+                            assigned_bar_idx_for_segment = bar_idx_cand
+                
+                if assigned_bar_idx_for_segment == -1: 
+                    if bar_absolute_start_times: 
+                         assigned_bar_idx_for_segment = min(bar_absolute_start_times.keys(), key=lambda k: bar_absolute_start_times[k])
+                    else: 
+                        if DEBUG_FLOW_EXTRACTOR: print(f"{LOG_PREFIX_FDE} DEBUG [{song_basename}] Phrase {phrase_idx+1} - No bars to assign to. Skipping phrase.", flush=True)
+                        break 
+                if assigned_bar_idx_for_segment == -1: 
+                    if DEBUG_FLOW_EXTRACTOR: print(f"{LOG_PREFIX_FDE} DEBUG [{song_basename}] Phrase {phrase_idx+1} - Could not assign to any bar. Skipping phrase.", flush=True)
+                    break
+
+                target_bar_info = next((bf for bf in song_beat_features if isinstance(bf,dict) and bf["bar_index"] == assigned_bar_idx_for_segment), None)
+                target_bar_abs_start_time = bar_absolute_start_times.get(assigned_bar_idx_for_segment)
+                target_bar_duration = bar_durations_map.get(assigned_bar_idx_for_segment)
+
+                if not target_bar_info or target_bar_abs_start_time is None or target_bar_duration is None:
+                    if DEBUG_FLOW_EXTRACTOR: print(f"{LOG_PREFIX_FDE} DEBUG [{song_basename}] Phrase {phrase_idx+1} - Missing full bar info for bar {assigned_bar_idx_for_segment}. Skipping.", flush=True)
+                    current_word_idx_in_phrase +=1 
+                    continue
+                
+                words_for_this_bar_flow_datum: List[WordTiming] = []
+                temp_phrase_word_idx = current_word_idx_in_phrase
+                effective_bar_end_time = target_bar_abs_start_time + target_bar_duration 
+                
+                while temp_phrase_word_idx < len(phrase_words):
+                    word_in_phrase = phrase_words[temp_phrase_word_idx]
+                    if word_in_phrase["start_time"] < effective_bar_end_time or (current_word_idx_in_phrase == temp_phrase_word_idx):
+                        words_for_this_bar_flow_datum.append(word_in_phrase)
+                        temp_phrase_word_idx += 1
+                    else:
+                        break 
+
+                if words_for_this_bar_flow_datum:
+                    line_idx_val = bar_line_counters.get(assigned_bar_idx_for_segment, 0)
+                    flow_datum = self._create_flow_datum_for_bar_segment(
+                        words_for_this_bar_flow_datum,
+                        target_bar_info,
+                        target_bar_abs_start_time,
+                        line_idx_val
+                    )
+                    if flow_datum:
+                        all_flow_data.append(flow_datum)
+                        bar_line_counters[assigned_bar_idx_for_segment] = line_idx_val + 1
+                    current_word_idx_in_phrase = temp_phrase_word_idx 
+                else:
+                    current_word_idx_in_phrase += 1
+                    if DEBUG_FLOW_EXTRACTOR: print(f"{LOG_PREFIX_FDE} DEBUG [{song_basename}] Phrase {phrase_idx+1} - No words collected for bar {assigned_bar_idx_for_segment}, though first word was assigned. Advancing.", flush=True)
+        
+        print(f"{LOG_PREFIX_FDE} [{song_basename}] Finished flow extraction. Total FlowDatum entries created: {len(all_flow_data)}", flush=True)
+        return all_flow_data if all_flow_data else None
+
 
 if __name__ == '__main__':
+    DEBUG_FLOW_EXTRACTOR = True 
     dummy_wt_content = {
-        "text": "yo this is a test flow line another one right here",
+        "text": "yo this is a test flow line another one right here then a much longer line that will definitely span multiple bars to test the new segmentation logic okay",
         "segments": [
-            {
-                "words": [
-                    {"word": "yo", "start_time": 0.5, "end_time": 0.9, "text": "yo"}, # Added text for WordTiming
-                    {"word": "this", "start_time": 1.0, "end_time": 1.4, "text": "this"},
-                    {"word": "is", "start_time": 1.5, "end_time": 1.8, "text": "is"}
-                ]
-            },
-            {
-                "words": [
-                    {"word": "a", "start_time": 2.2, "end_time": 2.6, "text": "a"},
-                    {"word": "test", "start_time": 2.7, "end_time": 3.3, "text": "test"}
-                ]
-            },
-            {
-                "words": [
-                    {"word": "flow", "start_time": 4.1, "end_time": 4.8, "text": "flow"},
-                    {"word": "line", "start_time": 5.0, "end_time": 5.5, "text": "line"},
-                    {"word": "another", "start_time": 5.6, "end_time": 6.2, "text": "another"},
-                    {"word": "one", "start_time": 6.3, "end_time": 6.6, "text": "one"},
-                    {"word": "right", "start_time": 6.7, "end_time": 7.0, "text": "right"},
-                    {"word": "here", "start_time": 7.1, "end_time": 7.5, "text": "here"}
-                ]
-            }
+            { "words": [ {"text": "yo", "start": 0.5, "end": 0.9}, {"text": "this", "start": 1.0, "end": 1.4}, {"text": "is", "start": 1.5, "end": 1.8} ] },
+            { "words": [ {"text": "a", "start": 2.2, "end": 2.6}, {"text": "test", "start": 2.7, "end": 3.3} ] },
+            { "words": [ {"text": "flow", "start": 4.1, "end": 4.8}, {"text": "line", "start": 5.0, "end": 5.5}, {"text": "another", "start": 5.6, "end": 6.2}, {"text": "one", "start": 6.3, "end": 6.6}, {"text": "right", "start": 6.7, "end": 7.0}, {"text": "here", "start": 7.1, "end": 7.5}, {"text": "then", "start": 8.1, "end": 8.5}, {"text": "a", "start": 8.6, "end": 8.8}, {"text": "much", "start": 8.9, "end": 9.3} ] }
         ]
     }
-    # Corrected dummy_wt_content to match LyricsData/WordTiming (text field)
-    # and whisper-timestamped output format (word dicts directly in segment["words"])
-    for seg in dummy_wt_content["segments"]:
-        new_words = []
-        for w_dict in seg["words"]:
-             # Ensure the dummy data matches the structure parse_whisper_timestamped_json expects
-            new_words.append({
-                "text": w_dict["word"], # whisper-timestamped uses "text"
-                "start": w_dict["start_time"],
-                "end": w_dict["end_time"],
-                "confidence": 0.9 # dummy confidence
-            })
-        seg["words"] = new_words
-
-
-    dummy_json_path = "dummy_alignment_flow_test_v2.json"
-    if not os.path.exists(dummy_json_path):
-        with open(dummy_json_path, "w") as f:
-            json.dump(dummy_wt_content, f, indent=2)
-        print(f"Created {dummy_json_path} for testing.")
+    dummy_json_path = "dummy_alignment_flow_test_stress_fde.json" 
+    if not os.path.exists(dummy_json_path) or True: 
+        with open(dummy_json_path, "w") as f: json.dump(dummy_wt_content, f, indent=2)
+        print(f"Created/Overwrote {dummy_json_path} for testing.", flush=True)
 
     dummy_sbf: SongBeatFeatures = [
-        {"bar_index": 0, "bpm": 120.0, "time_signature": (4, 4), "kick_events": [0, 8], "snare_events": [4, 12], "hihat_events": list(range(0,16,2)), "bass_events": [0]}, # Bar duration = 2s
-        {"bar_index": 1, "bpm": 120.0, "time_signature": (4, 4), "kick_events": [0, 8], "snare_events": [4, 12], "hihat_events": list(range(0,16,4)), "bass_events": [0,2,4,6]}, # Bar duration = 2s
-        {"bar_index": 2, "bpm": 120.0, "time_signature": (4, 4), "kick_events": [0,6,10], "snare_events": [4], "hihat_events": [], "bass_events": [8]}, # Bar duration = 2s
-        {"bar_index": 3, "bpm": 120.0, "time_signature": (4, 4), "kick_events": [], "snare_events": [], "hihat_events": [], "bass_events": []} # Bar duration = 2s
+        {"bar_index": 0, "bpm": 120.0, "time_signature": (4, 4), "bar_start_time_sec": 0.0, "bar_duration_sec": 2.0, "kick_events": [], "snare_events": [], "hihat_events": [], "bass_events": []},
+        {"bar_index": 1, "bpm": 120.0, "time_signature": (4, 4), "bar_start_time_sec": 2.0, "bar_duration_sec": 2.0, "kick_events": [], "snare_events": [], "hihat_events": [], "bass_events": []},
+        {"bar_index": 2, "bpm": 120.0, "time_signature": (4, 4), "bar_start_time_sec": 4.0, "bar_duration_sec": 2.0, "kick_events": [], "snare_events": [], "hihat_events": [], "bass_events": []},
+        {"bar_index": 3, "bpm": 120.0, "time_signature": (4, 4), "bar_start_time_sec": 6.0, "bar_duration_sec": 2.0, "kick_events": [], "snare_events": [], "hihat_events": [], "bass_events": []},
+        {"bar_index": 4, "bpm": 120.0, "time_signature": (4, 4), "bar_start_time_sec": 8.0, "bar_duration_sec": 2.0, "kick_events": [], "snare_events": [], "hihat_events": [], "bass_events": []}
     ]
 
-    # Test with subdivisions_per_bar = 16 (default)
     flow_extractor = FlowDataExtractor(subdivisions_per_bar=16)
-    print(f"\nExtracting flow from: {dummy_json_path} with {flow_extractor.subdivisions_per_bar} subdivisions/bar")
+    print(f"\n--- Running Test with FlowDataExtractor (with Syllable Stress) ---", flush=True)
     extracted_flow_data = flow_extractor.extract_flow_for_song(dummy_json_path, dummy_sbf)
     
     if extracted_flow_data:
-        print("\nExtracted Flow Data (Test):")
+        print("\n--- Extracted Flow Data (with Syllable Stress) ---", flush=True)
         for i, fd in enumerate(extracted_flow_data): 
-            print(f"  Segment {i}:")
-            for key, val in fd.items():
-                print(f"    {key}: {val}")
+            print(f"  FlowDatum {i+1}: Bar {fd['bar_index']}, LineInBar {fd['line_index_in_bar']}, Syls: {fd['syllables']}, "
+                  f"Offset: {fd['start_offset_beats']:.2f}b, Dur: {fd['duration_beats']:.2f}b, "
+                  f"Subdivs: {fd['syllable_start_subdivisions']}, QuantSylDurs: {fd['syllable_durations_quantized']}, "
+                  f"Stresses: {fd['syllable_stresses']}", flush=True)
+        
+        print(f"\nTotal FlowDatum entries generated: {len(extracted_flow_data)}", flush=True)
+        assert len(extracted_flow_data) >= 3 
+        if extracted_flow_data:
+            assert "syllable_stresses" in extracted_flow_data[0]
+            assert isinstance(extracted_flow_data[0]["syllable_stresses"], list)
+            if extracted_flow_data[0]["syllables"] > 0:
+                 assert len(extracted_flow_data[0]["syllable_stresses"]) == len(extracted_flow_data[0]["syllable_start_subdivisions"])
+                 assert isinstance(extracted_flow_data[0]["syllable_stresses"][0], int)
     else:
-        print("No flow data extracted.")
+        print("No flow data extracted from test file with stress addition.", flush=True)
 
-    # Example: First line "yo this is" (0.5s to 1.8s) in bar 0 (starts 0s, duration 2s).
-    # Word "yo" (0.5-0.9), 1 syllable. syl_time_in_bar = 0.5. norm = 0.5/2 = 0.25. subdiv_idx = 0.25*16 = 4.
-    # Word "this" (1.0-1.4), 1 syllable. syl_time_in_bar = 1.0. norm = 1.0/2 = 0.5. subdiv_idx = 0.5*16 = 8.
-    # Word "is" (1.5-1.8), 1 syllable. syl_time_in_bar = 1.5. norm = 1.5/2 = 0.75. subdiv_idx = 0.75*16 = 12.
-    # Expected for first line: syllable_start_subdivisions: [4, 8, 12]
+    if os.path.exists(dummy_json_path):
+        os.remove(dummy_json_path)

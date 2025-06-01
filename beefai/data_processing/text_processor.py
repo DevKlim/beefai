@@ -1,21 +1,26 @@
-from typing import List
+from typing import List, Dict, Any, Tuple, Optional
 import pyphen 
 import re 
 import os 
 import sys 
 import ctypes.util 
 
+# Import SyllableDetail for type hinting
+from beefai.utils.data_types import SyllableDetail
+
+
 PHONEMIZER_AVAILABLE = False 
-PHONEMIZER_BACKEND_INITIALIZED = False # Global flag to track backend status
-ESPEAK_NG_PATH_HINT = None # Stores the detected directory of espeak-ng installation
+PHONEMIZER_BACKEND_INITIALIZED = False 
+ESPEAK_NG_PATH_HINT = None 
 
 try:
     from phonemizer import phonemize
     from phonemizer.backend import EspeakBackend 
     from phonemizer.backend.espeak.wrapper import EspeakWrapper
+    from phonemizer.separator import Separator
     PHONEMIZER_AVAILABLE = True 
 except ImportError:
-    print("Warning: 'phonemizer' library not found. Phoneme generation will not be functional.")
+    print("Warning: 'phonemizer' library not found. Phoneme and stress generation will not be functional.")
     print("Please install phonemizer: pip install phonemizer")
 
 if sys.platform == "win32" and PHONEMIZER_AVAILABLE:
@@ -57,7 +62,19 @@ class TextProcessor:
             print(f"Warning: Failed to initialize pyphen for language '{language}'. Syllable counting will be naive. Error: {e}")
 
         self.phonemizer_lang = phonemizer_lang
-        
+        # FIX: Ensure separators are distinct if not empty.
+        # phone: separator for phonemes within a syllable (can be empty if not needed)
+        # syllable: separator for syllables within a word
+        # word: separator for words
+        try:
+            self.phonemizer_separator = Separator(phone='_', syllable='|', word=' ') 
+        except ValueError as e_sep:
+            print(f"CRITICAL ERROR initializing phonemizer.Separator: {e_sep}")
+            print("This indicates a problem with the separator characters. Using default fallback.")
+            # Fallback to a known good default or simpler Separator if above fails (shouldn't with '_')
+            self.phonemizer_separator = Separator(syllable='|')
+
+
         if PHONEMIZER_AVAILABLE and not TextProcessor._backend_init_attempted:
             TextProcessor._backend_init_attempted = True 
             
@@ -105,22 +122,16 @@ class TextProcessor:
                 print(f"  Attempting to initialize EspeakBackend for language '{self.phonemizer_lang}' (using default language_switch)...")
                 backend_instance = EspeakBackend(self.phonemizer_lang) 
                 print("  EspeakBackend object created. Now attempting to phonemize 'test'...")
-                _ = backend_instance.phonemize(["test"]) 
+                # Use the separator defined for the class instance if phonemize call needs it
+                _ = backend_instance.phonemize(["test"], separator=self.phonemizer_separator) 
                 print(f"Phonemizer EspeakBackend successfully initialized and tested for language: {self.phonemizer_lang}.")
                 PHONEMIZER_BACKEND_INITIALIZED = True 
             except Exception as e:
                 PHONEMIZER_BACKEND_INITIALIZED = False 
                 print(f"ERROR: Phonemizer EspeakBackend for '{self.phonemizer_lang}' could NOT be initialized or tested.")
                 print(f"  Error details: {e}")
-                print("  Troubleshooting tips for espeak-ng issues:")
-                print("  - Ensure 'espeak-ng' (recommended) is properly installed and functional from your command line.")
-                print("  - Its main installation directory (containing espeak-ng.exe AND libespeak-ng.dll) SHOULD be in your system PATH.")
-                print("  - Alternatively, set an environment variable 'ESPEAK_NG_PATH' pointing to this installation directory.")
-                print("  - On Windows, typical paths are 'C:\\Program Files\\eSpeak NG' or 'C:\\Program Files (x86)\\eSpeak NG'.")
-                print("  - Consider testing with a very simple Python script that only initializes EspeakBackend and phonemizes a word, outside of this larger project, to isolate the issue.")
-                print("  - Check the versions of 'phonemizer' and 'espeak-ng'. There might be incompatibilities.")
-                if not dll_set_successfully:
-                    print("  Also note: The script's attempt to directly set the espeak-ng DLL path was not successful.")
+                print("  Troubleshooting tips for espeak-ng issues (Ensure espeak-ng is installed and in PATH, or ESPEAK_NG_PATH is set).")
+
             finally:
                 if path_modified_for_init: 
                     os.environ["PATH"] = original_path_env
@@ -138,6 +149,22 @@ class TextProcessor:
         cleaned_word = re.sub(r"[^a-zA-Z0-9']", "", word.lower())
         if not cleaned_word:
             return 0
+        if PHONEMIZER_AVAILABLE and PHONEMIZER_BACKEND_INITIALIZED:
+            try:
+                phonemized_word_syllables = phonemize(
+                    cleaned_word,
+                    language=self.phonemizer_lang,
+                    backend='espeak',
+                    separator=self.phonemizer_separator, 
+                    strip=True, 
+                    preserve_punctuation=False,
+                    njobs=1
+                )
+                if phonemized_word_syllables and isinstance(phonemized_word_syllables, str):
+                    return phonemized_word_syllables.count(self.phonemizer_separator.syllable) + 1
+            except Exception:
+                pass 
+
         if self.syllabifier:
             hyphenated_word = self.syllabifier.inserted(cleaned_word)
             return hyphenated_word.count('-') + 1
@@ -153,23 +180,67 @@ class TextProcessor:
             if count <= 0 and len(cleaned_word) > 0: count = 1 
             return count
 
-    def get_syllables_from_word(self, word: str) -> List[str]:
-        """
-        Splits a word into its constituent syllables using pyphen.
-        Returns a list of syllable strings.
-        """
-        if not word:
-            return []
+    def get_syllables_with_stress(self, word: str) -> List[Tuple[str, int]]:
+        if not word: return []
         cleaned_word = re.sub(r"[^a-zA-Z0-9']", "", word.lower())
-        if not cleaned_word:
-            return []
-        
+        if not cleaned_word: return []
+
+        syllables_with_stress: List[Tuple[str, int]] = []
+
+        if PHONEMIZER_AVAILABLE and PHONEMIZER_BACKEND_INITIALIZED:
+            try:
+                phonemized_output = phonemize(
+                    cleaned_word,
+                    language=self.phonemizer_lang, 
+                    backend='espeak',
+                    separator=self.phonemizer_separator, 
+                    strip=False, 
+                    preserve_punctuation=False,
+                    njobs=1
+                )
+
+                if isinstance(phonemized_output, str) and phonemized_output.strip():
+                    syllable_phoneme_groups = phonemized_output.split(self.phonemizer_separator.syllable)
+                    
+                    pyphen_syllables = self.syllabifier.inserted(cleaned_word).split('-') if self.syllabifier else [cleaned_word]
+                    num_phon_syllables = len(syllable_phoneme_groups)
+                    num_pyphen_syllables = len(pyphen_syllables)
+
+                    for i in range(min(num_phon_syllables, num_pyphen_syllables)):
+                        phon_syl = syllable_phoneme_groups[i]
+                        pyphen_syl_text = pyphen_syllables[i]
+                        stress = 0 
+                        if 'ˈ' in phon_syl: 
+                            stress = 1
+                        elif 'ˌ' in phon_syl: 
+                            stress = 2
+                        syllables_with_stress.append((pyphen_syl_text, stress))
+                    
+                    if num_pyphen_syllables > num_phon_syllables:
+                        for i in range(num_phon_syllables, num_pyphen_syllables):
+                            syllables_with_stress.append((pyphen_syllables[i], 0))
+                    
+                    if syllables_with_stress: return syllables_with_stress
+            except Exception as e:
+                pass 
+
         if self.syllabifier:
-            # pyphen.inserted() returns 'syl-la-ble'. We split by '-'
+            pyphen_syllables = self.syllabifier.inserted(cleaned_word).split('-')
+            for i, syl_text in enumerate(pyphen_syllables):
+                stress = 0 
+                syllables_with_stress.append((syl_text, stress))
+            return syllables_with_stress
+        else: 
+            return [(cleaned_word, 0)]
+
+
+    def get_syllables_from_word(self, word: str) -> List[str]:
+        if not word: return []
+        cleaned_word = re.sub(r"[^a-zA-Z0-9']", "", word.lower())
+        if not cleaned_word: return []
+        if self.syllabifier:
             return self.syllabifier.inserted(cleaned_word).split('-')
         else:
-            # Naive fallback if pyphen is not available: return the word as a single syllable
-            # A more complex rule-based syllabifier could be implemented here if pyphen often fails.
             return [cleaned_word]
 
 
@@ -181,7 +252,7 @@ class TextProcessor:
                 total_syllables += self.count_syllables_in_word(word)
         return total_syllables
 
-    def get_phonemes(self, text: str, strip_stress: bool = True) -> List[str]:
+    def get_phonemes(self, text: str, strip_stress_for_phoneme_list: bool = True) -> List[str]:
         if not PHONEMIZER_AVAILABLE or not PHONEMIZER_BACKEND_INITIALIZED: 
             if not hasattr(self, '_phonemizer_warning_printed_get_phonemes'): 
                 self._phonemizer_warning_printed_get_phonemes = True 
@@ -191,26 +262,34 @@ class TextProcessor:
             return []
         try:
             cleaned_text = text.lower() 
-            phonemes_str_list = phonemize(
+            # This separator is for get_phonemes specifically, not self.phonemizer_separator
+            phonemizer_get_phonemes_separator = Separator(phone=' ', word=';') 
+
+            phonemes_str_list_or_str = phonemize(
                 cleaned_text,
                 language=self.phonemizer_lang,
                 backend='espeak', 
-                separator=None, 
-                strip=strip_stress,      
+                separator=phonemizer_get_phonemes_separator, 
+                strip=strip_stress_for_phoneme_list, 
                 preserve_punctuation=False,
                 njobs=1 
             )
             
             processed_phonemes = []
-            if isinstance(phonemes_str_list, list): 
-                for item in phonemes_str_list:
-                    if isinstance(item, str) and item.strip():
-                        processed_phonemes.extend(item.split()) 
+            if isinstance(phonemes_str_list_or_str, str):
+                words_phonemes = phonemes_str_list_or_str.split(';')
+                for word_ph in words_phonemes:
+                    processed_phonemes.extend(p for p in word_ph.split(' ') if p.strip())
                 return processed_phonemes
-            elif isinstance(phonemes_str_list, str): 
-                return [p for p in phonemes_str_list.split() if p.strip()]
+            elif isinstance(phonemes_str_list_or_str, list): 
+                 for item_str in phonemes_str_list_or_str:
+                    if isinstance(item_str, str):
+                        words_phonemes = item_str.split(';')
+                        for word_ph in words_phonemes:
+                            processed_phonemes.extend(p for p in word_ph.split(' ') if p.strip())
+                 return processed_phonemes
             else:
-                print(f"Warning: Unexpected phoneme output type from phonemizer: {type(phonemes_str_list)}. Text: '{text}'. Returning empty list.")
+                print(f"Warning: Unexpected phoneme output type from phonemizer: {type(phonemes_str_list_or_str)}. Text: '{text}'. Returning empty list.")
                 return []
 
         except Exception as e:
@@ -228,37 +307,40 @@ if __name__ == "__main__":
     
     print(f"Status after first TextProcessor init: PHONEMIZER_BACKEND_INITIALIZED={PHONEMIZER_BACKEND_INITIALIZED}")
     
+    test_words_for_stress = ["example", "syllabification", "apple", "computer", "today", "another", "rhythm", "extraordinary", "hello"]
+    print("\nSyllable and Stress Test:")
+    for word in test_words_for_stress:
+        syllables_stress_info = tp.get_syllables_with_stress(word)
+        print(f"  Word: '{word}'")
+        for syl_text, stress_val in syllables_stress_info:
+            stress_label = "Unstressed"
+            if stress_val == 1: stress_label = "Primary"
+            elif stress_val == 2: stress_label = "Secondary"
+            print(f"    - Syllable: '{syl_text}', Stress: {stress_label} ({stress_val})")
+        print(f"    Syllable count (from count_syllables_in_word): {tp.count_syllables_in_word(word)}")
+
+
     line = "This is a test sentence for syllables, an example."
     words = ["hello", "world", "beautiful", "rhythm", "example", "fire", "apple", "don't", "strength", "syllabification"]
-    print("\nSyllable Counts:")
+    print("\nOriginal Syllable Counts & Breakdown:")
     for word in words:
         print(f"  Syllables in '{word}': {tp.count_syllables_in_word(word)}")
         print(f"  Syllable breakdown for '{word}': {tp.get_syllables_from_word(word)}")
-
     print(f"\n  Total syllables in '{line}': {tp.count_syllables_in_line(line)}")
 
     print("\nPhoneme Generation Test:")
     test_sentence = "Hello world, this is a test."
-    phonemes = tp.get_phonemes(test_sentence)
+    phonemes_stripped = tp.get_phonemes(test_sentence, strip_stress_for_phoneme_list=True)
+    phonemes_with_stress = tp.get_phonemes(test_sentence, strip_stress_for_phoneme_list=False)
     
     if PHONEMIZER_BACKEND_INITIALIZED:
-        if phonemes:
-            print(f"  Phonemes for '{test_sentence}': {phonemes}")
-        else:
-            print(f"  Phoneme generation returned empty for '{test_sentence}', though backend seemed initialized. Check text or phonemizer behavior.")
+        if phonemes_stripped:
+            print(f"  Phonemes for '{test_sentence}' (stress stripped): {phonemes_stripped}")
+        if phonemes_with_stress:
+            print(f"  Phonemes for '{test_sentence}' (stress kept): {phonemes_with_stress}")
+        if not phonemes_stripped and not phonemes_with_stress:
+            print(f"  Phoneme generation returned empty for '{test_sentence}', though backend seemed initialized.")
     else:
         print(f"  Could not generate phonemes for '{test_sentence}' (Phonemizer backend not initialized or failed).")
-
-    phonemes_contraction = tp.get_phonemes("don't")
-    if PHONEMIZER_BACKEND_INITIALIZED:
-        print(f"  Phonemes for 'don't': {phonemes_contraction}")
-    
-    print("\n--- Creating second TextProcessor instance ---")
-    tp2 = TextProcessor() 
-    phonemes_tp2 = tp2.get_phonemes("Another test.")
-    if PHONEMIZER_BACKEND_INITIALIZED: 
-        print(f"  Phonemes from tp2 for 'Another test.': {phonemes_tp2}")
-    else:
-        print(f"  Phoneme generation from tp2 failed (backend not initialized or previously failed).")
 
     print("--- TextProcessor Test Complete ---")

@@ -5,7 +5,8 @@ import numpy as np
 from typing import List, Optional, Dict, Any
 
 # Assuming these types are defined in your project
-from beefai.utils.data_types import BeatInfo, FlowData, FlowDatum # Ensure FlowDatum is imported
+# Corrected import path assuming data_types.py is in beefai.utils
+from beefai.utils.data_types import BeatInfo, FlowData, FlowDatum 
 
 class FlowModel:
     def __init__(self, model_path: Optional[str] = None):
@@ -42,52 +43,48 @@ class FlowModel:
             print("FlowModel (Stub): Valid BPM info missing, cannot generate meaningful flow. Returning empty.")
             return flow_data
 
-        bpm = beat_info.get("bpm", 120.0) # Default to 120 if somehow still missing after check
+        bpm = beat_info.get("bpm", 120.0) 
         beats_per_bar = beat_info.get("beats_per_bar", 4)
-        if beats_per_bar <= 0: beats_per_bar = 4 # Ensure valid
+        if beats_per_bar <= 0: beats_per_bar = 4 
         
-        current_bar_idx_in_song = 0 # Assume generation starts from bar 0 of the song context
+        current_bar_idx_in_song = 0 
         
-        for bar_num_generated in range(num_bars): # Iterate for num_bars to generate
+        for bar_num_generated in range(num_bars): 
             for line_in_bar_num in range(lines_per_bar):
-                # Simple alternating syllable counts and timings for the stub
                 syllables = 8 if (bar_num_generated * lines_per_bar + line_in_bar_num) % 2 == 0 else 12
-                
-                # Distribute lines somewhat evenly within the bar for the stub
                 start_offset_beats = (line_in_bar_num / lines_per_bar) * beats_per_bar
-                # Make duration a bit less than the available slot
                 duration_beats = (1.0 / lines_per_bar) * beats_per_bar * 0.8 
                 
-                # Dummy syllable start subdivisions for the stub
-                # Spread syllables somewhat evenly across the duration for this dummy data
                 syllable_start_subdivisions: List[int] = []
                 if syllables > 0 and duration_beats > 0:
-                    # Assuming 16 subdivisions per bar, 4 per beat for 4/4 time
                     subdivisions_per_beat_for_stub = 4 
                     total_subdivisions_for_duration = int(duration_beats * subdivisions_per_beat_for_stub)
-                    start_subdivision_offset = int(start_offset_beats * subdivisions_per_beat_for_stub)
+                    # Offset subdivisions based on the line's start_offset_beats within the bar
+                    start_subdivision_offset_in_bar = int(start_offset_beats * subdivisions_per_beat_for_stub)
 
                     if total_subdivisions_for_duration > 0 :
                         step = max(1, total_subdivisions_for_duration // syllables)
                         for k in range(syllables):
-                            subdiv_idx = start_subdivision_offset + k * step
-                            if subdiv_idx < beats_per_bar * subdivisions_per_beat_for_stub: # Ensure within bar limits
-                                syllable_start_subdivisions.append(subdiv_idx)
+                            # Subdivision index is relative to the start of the bar
+                            subdiv_idx_in_bar = start_subdivision_offset_in_bar + k * step
+                            # Ensure it's within the bar's total subdivisions (e.g., 0-15 for 16 subdivs)
+                            if subdiv_idx_in_bar < beats_per_bar * subdivisions_per_beat_for_stub: 
+                                syllable_start_subdivisions.append(subdiv_idx_in_bar)
                             if len(syllable_start_subdivisions) >= syllables: break
                 
-                flow_datum: FlowDatum = { # Explicitly cast to FlowDatum type
-                    "bar_index": current_bar_idx_in_song, # This is the absolute bar index in the song
+                # Explicitly create FlowDatum
+                flow_datum_entry: FlowDatum = { 
+                    "bar_index": current_bar_idx_in_song, 
                     "line_index_in_bar": line_in_bar_num,
                     "syllables": syllables,
                     "start_offset_beats": round(start_offset_beats, 2),
                     "duration_beats": round(duration_beats, 2),
                     "syllable_start_subdivisions": syllable_start_subdivisions 
                 }
-                flow_data.append(flow_datum)
+                flow_data.append(flow_datum_entry)
             
-            current_bar_idx_in_song += 1 # Move to next bar in song context
+            current_bar_idx_in_song += 1 
         
-        # print(f"FlowModel (Stub): Generated {len(flow_data)} dummy flow segments for {num_bars} bars.")
         return flow_data
 
     def train(self, training_data_path: str):
@@ -99,14 +96,11 @@ class FlowModel:
             "should be done using 'lite_model_training/train_lite_flow_model.py' "
             "or 'scripts/train_flow_model.py' for the FlowTransformerDecoder."
         )
-        # print(f"STUB: {error_message}")
         raise NotImplementedError(error_message)
 
-# Example Usage (illustrative)
 if __name__ == "__main__":
     model = FlowModel()
     
-    # A more complete BeatInfo, especially with downbeat_times
     dummy_bpm = 90.0
     dummy_beat_duration = 60.0 / dummy_bpm
     dummy_beats_per_bar = 4
@@ -115,9 +109,9 @@ if __name__ == "__main__":
     dummy_beat_info: BeatInfo = {
         "bpm": dummy_bpm,
         "beat_times": [i * dummy_beat_duration for i in range(32)], 
-        "downbeat_times": [i * dummy_bar_duration for i in range(8)], # Crucial for bar timings
+        "downbeat_times": [i * dummy_bar_duration for i in range(8)], 
         "beats_per_bar": dummy_beats_per_bar,
-        "estimated_bar_duration": dummy_bar_duration # Can be estimated if downbeats are sparse
+        "estimated_bar_duration": dummy_bar_duration 
     }
     
     print("\nAttempting to generate flow (stub implementation)...")
@@ -126,6 +120,7 @@ if __name__ == "__main__":
     if generated_flow:
         print("\nGenerated Flow Data (Stub):")
         for i, fd in enumerate(generated_flow):
+            # fd is now ensured to be FlowDatum-like by type hint in generate_flow
             print(f"  Line {i+1}: BarIdx={fd['bar_index']}, LineInBar={fd['line_index_in_bar']}, "
                   f"Syls={fd['syllables']}, Offset={fd['start_offset_beats']:.2f}b, Dur={fd['duration_beats']:.2f}b, "
                   f"Subdivs={fd.get('syllable_start_subdivisions')}")

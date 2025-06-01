@@ -10,7 +10,7 @@ import time
 import sys
 import random # For setting seeds
 import numpy as np # For setting seeds
-import torch.nn as nn # Added for nn.Module in save_checkpoint
+import torch.nn as nn # Added for type hint in save_checkpoint
 
 # Adjust import paths if beefai is not directly in PYTHONPATH
 sys.path.append(os.getcwd()) 
@@ -153,7 +153,7 @@ def train_full_model(): # Renamed function for clarity
         block_size=gpt_config.block_size # Use block_size from model config
     )
     # Consider num_workers based on CPU cores for DataLoader
-    num_dataloader_workers = min(os.cpu_count() // 2, 4) if os.cpu_count() else 0
+    num_dataloader_workers = min(os.cpu_count() // 2, 4) if os.cpu_count() and os.cpu_count() > 1 else 0
     train_loader = DataLoader(train_dataset, batch_size=batch_size, shuffle=True, 
                               num_workers=num_dataloader_workers, pin_memory=(DEVICE=="cuda"))
     
@@ -174,7 +174,7 @@ def train_full_model(): # Renamed function for clarity
     effective_steps_per_epoch = max(1, len(train_loader) // grad_accumulation_steps)
     total_training_steps = effective_steps_per_epoch * epochs
     scheduler = OneCycleLR(optimizer, max_lr=learning_rate,
-                           total_steps=total_training_steps,
+                           total_steps=total_training_steps if total_training_steps > 0 else 100, # ensure total_steps > 0
                            pct_start=0.1, # Percentage of steps for warmup
                            anneal_strategy='cos') # Cosine annealing
     
@@ -198,11 +198,12 @@ def train_full_model(): # Renamed function for clarity
             segment_ids = batch["segment_ids"].to(DEVICE, non_blocking=True)
             intra_line_pos_ids = batch["intra_line_pos_ids"].to(DEVICE, non_blocking=True)
 
+            loss_val = 0.0 # Initialize loss_val
             # Forward pass
             if USE_AMP and scaler:
                 with torch.cuda.amp.autocast():
                     logits, loss = model(input_ids, segment_ids=segment_ids, intra_line_pos_ids=intra_line_pos_ids, targets=target_ids)
-                if loss is not None: # Handle cases where loss might be None (e.g. if model internally handles it)
+                if loss is not None: 
                     loss_val = loss.item()
                     loss_to_backward = loss / grad_accumulation_steps
                     scaler.scale(loss_to_backward).backward()
@@ -213,14 +214,14 @@ def train_full_model(): # Renamed function for clarity
                     loss_to_backward = loss / grad_accumulation_steps
                     loss_to_backward.backward()
             
-            if loss is not None:
+            if loss is not None: # Check if loss was computed
                 epoch_train_loss += loss_val
 
             # Gradient accumulation
             if (i + 1) % grad_accumulation_steps == 0 or (i + 1) == len(train_loader):
                 if USE_AMP and scaler:
-                    scaler.unscale_(optimizer) # Unscale before clipping
-                torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0) # Clip gradients
+                    scaler.unscale_(optimizer) 
+                torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0) 
                 
                 if USE_AMP and scaler:
                     scaler.step(optimizer)
@@ -228,12 +229,11 @@ def train_full_model(): # Renamed function for clarity
                 else:
                     optimizer.step()
                 
-                optimizer.zero_grad(set_to_none=True) # More memory efficient
-                scheduler.step() # Step scheduler after optimizer step
+                optimizer.zero_grad(set_to_none=True) 
+                if total_training_steps > 0 : scheduler.step() 
                 global_step += 1
 
-                # Logging to TensorBoard (at each actual optimizer step)
-                if loss is not None:
+                if loss is not None: # Log only if loss was computed
                     writer.add_scalar('FULL/Train/Loss_step', loss_val, global_step)
                 writer.add_scalar('FULL/Train/LearningRate', optimizer.param_groups[0]['lr'], global_step)
                 progress_bar.set_postfix(loss=f"{loss_val:.4f}", lr=f"{optimizer.param_groups[0]['lr']:.2e}")
@@ -242,7 +242,7 @@ def train_full_model(): # Renamed function for clarity
                 # Evaluation and Checkpointing (based on global_step)
                 if global_step > 0 and global_step % eval_interval_steps == 0 and val_loader:
                     evaluate(model, val_loader, DEVICE, pad_token_id, USE_AMP, "FULL", writer, global_step) 
-                    model.train() # Ensure model is back in train mode
+                    model.train() 
 
                 if global_step > 0 and global_step % save_interval_steps == 0:
                     save_checkpoint(model, optimizer, epoch, global_step, scheduler, checkpoint_dir, filename=f"full_ckpt_step_{global_step}.pt", model_type="FULL")
@@ -254,12 +254,10 @@ def train_full_model(): # Renamed function for clarity
         print(f"FULL Epoch {epoch+1} finished. Avg Train Loss: {avg_epoch_train_loss:.4f}. Time: {epoch_duration:.2f}s. LR: {optimizer.param_groups[0]['lr']:.2e}")
         writer.add_scalar('FULL/Train/Loss_epoch', avg_epoch_train_loss, epoch + 1)
         
-        # End of epoch validation (optional, could be done less frequently)
         if val_loader:
-            evaluate(model, val_loader, DEVICE, pad_token_id, USE_AMP, "FULL", writer, global_step) # Use global_step for x-axis
+            evaluate(model, val_loader, DEVICE, pad_token_id, USE_AMP, "FULL", writer, global_step) 
             model.train()
         
-        # Save checkpoint at end of each epoch
         save_checkpoint(model, optimizer, epoch + 1, global_step, scheduler, checkpoint_dir, filename=f"full_ckpt_epoch_{epoch+1}.pt", model_type="FULL")
 
     print(f"\nFULL training complete. Total time: {total_training_time_seconds/3600:.2f} hours.")
@@ -298,20 +296,18 @@ def evaluate(model, val_loader, device, pad_token_id, use_amp, model_type_str, w
     perplexity_val = torch.exp(torch.tensor(avg_val_loss)) if avg_val_loss > 0 and num_batches > 0 else float('inf')
     print(f"{model_type_str} Validation Summary: Avg Loss: {avg_val_loss:.4f}, Perplexity: {perplexity_val:.2f}")
 
-    writer.add_scalar(f'{model_type_str}/Val/Loss', avg_val_loss, current_global_step)
-    writer.add_scalar(f'{model_type_str}/Val/Perplexity', perplexity_val, current_global_step)
+    if writer: # Check if writer is available
+        writer.add_scalar(f'{model_type_str}/Val/Loss', avg_val_loss, current_global_step)
+        writer.add_scalar(f'{model_type_str}/Val/Perplexity', perplexity_val, current_global_step)
     return avg_val_loss
 
 def save_checkpoint(model, optimizer, epoch, step, scheduler, checkpoint_dir, filename=None, model_type="Model"): 
     if filename is None:
         filename = f"{model_type.lower()}_ckpt_epoch_{epoch}_step_{step}.pt"
     
-    # Ensure the specific model type's checkpoint subdirectory exists (e.g., data/checkpoints/flow_model_full/)
-    # The `checkpoint_dir` passed should already be the correct one.
     os.makedirs(checkpoint_dir, exist_ok=True) 
     checkpoint_path = os.path.join(checkpoint_dir, filename)
     
-    # Handle compiled model: save original model's state_dict
     model_to_save = model._orig_mod if hasattr(model, '_orig_mod') and isinstance(model._orig_mod, nn.Module) else model
 
     checkpoint_data = {
@@ -319,7 +315,7 @@ def save_checkpoint(model, optimizer, epoch, step, scheduler, checkpoint_dir, fi
         'step': step,
         'model_state_dict': model_to_save.state_dict(),
         'optimizer_state_dict': optimizer.state_dict(),
-        'config': model_to_save.config if hasattr(model_to_save, 'config') else None # Save model config
+        'config': model_to_save.config if hasattr(model_to_save, 'config') and model_to_save.config is not None else None
     }
     if scheduler:
         checkpoint_data['scheduler_state_dict'] = scheduler.state_dict()
