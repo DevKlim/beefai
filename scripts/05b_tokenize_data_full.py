@@ -7,7 +7,7 @@ from typing import List, Dict, Any
 import sys
 
 # Ensure the project root is in the Python path
-sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '../')))
+sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
 
 from beefai.flow_model.tokenizer import FlowTokenizer
 from beefai.utils.data_types import TrainingInstance # Make sure this type hint matches your actual structure
@@ -39,17 +39,14 @@ def tokenize_data_full():
         print(f"ERROR: 'tokenizer_path' not specified in {DATA_CONFIG_FULL_PATH}")
         return
 
-    # Input from preprocess_dataset.py
-    # Ensure this path is correctly specified in data_config_full.yaml
-    # It should point to the directory containing "processed_training_data.pt"
     processed_data_source_dir = data_config.get("processed_data_source_dir") 
     if not processed_data_source_dir:
         print(f"ERROR: 'processed_data_source_dir' not specified in {DATA_CONFIG_FULL_PATH}")
         return
+    # Use a default filename if not specified, but encourage user to specify it in YAML
     processed_data_filename = data_config.get("processed_data_filename", "processed_training_data.pt")
     processed_data_file = os.path.join(processed_data_source_dir, processed_data_filename) 
     
-    # Output paths for tokenized data, ensure these are in data_config_full.yaml
     tokenized_output_dir = data_config.get("tokenized_data_output_dir")
     if not tokenized_output_dir:
         print(f"ERROR: 'tokenized_data_output_dir' not specified in {DATA_CONFIG_FULL_PATH}")
@@ -85,6 +82,7 @@ def tokenize_data_full():
     
     print(f"Loading processed data instances from: {processed_data_file}...")
     try:
+        # Ensure weights_only=False if your .pt file contains non-tensor data (like list of dicts)
         all_song_instances: List[TrainingInstance] = torch.load(processed_data_file, weights_only=False)
     except Exception as e:
         print(f"ERROR loading {processed_data_file}: {e}")
@@ -98,30 +96,25 @@ def tokenize_data_full():
 
     if max_songs_for_full > 0 and len(all_song_instances) > max_songs_for_full :
         print(f"Randomly selecting {max_songs_for_full} songs for the FULL dataset from {len(all_song_instances)} available.")
-        # Ensure reproducibility if needed by setting random.seed elsewhere or here.
-        # random.seed(data_config.get("random_seed", 42)) 
         selected_instances = random.sample(all_song_instances, max_songs_for_full)
     else:
         print(f"Using all {len(all_song_instances)} available songs for the FULL dataset.")
         selected_instances = all_song_instances
-        # random.shuffle(selected_instances) # Shuffle to ensure val split is random if not sampling
 
     tokenized_songs_for_dataset: List[Dict[str, torch.Tensor]] = []
     skipped_count = 0
     
     print(f"Tokenizing {len(selected_instances)} selected song instances for FULL dataset...")
     for i, song_instance_dict in enumerate(tqdm(selected_instances, desc="Tokenizing for Full Dataset")):
-        # Ensure keys match what preprocess_dataset.py saves in TrainingInstance
         song_name = song_instance_dict.get('song_name', f"UnknownSong_{i}") 
         beat_features = song_instance_dict.get('beat_features')
-        flow_data = song_instance_dict.get('flow_data') # Key was 'flow_data' in updated preprocess_dataset
+        flow_data = song_instance_dict.get('flow_data')
 
-        if not beat_features and not flow_data: # Allow if one is present
+        if not beat_features and not flow_data:
             print(f"WARNING for {song_name}: Both beat_features and flow_data are missing or empty. Skipping.")
             skipped_count += 1
             continue
         
-        # Ensure they are lists, even if empty, for tokenizer
         current_beat_features = beat_features if beat_features is not None else []
         current_flow_data = flow_data if flow_data is not None else []
 
@@ -135,12 +128,11 @@ def tokenize_data_full():
             skipped_count += 1
             continue
         
-        if not token_ids: # Should not happen if BOS/EOS are always added
+        if not token_ids: 
             print(f"WARNING for {song_name}: Tokenization resulted in empty token_ids. Skipping.")
             skipped_count += 1
             continue
 
-        # Validate segment and intra-line position IDs against model config limits
         max_observed_segment_id = max(segment_ids) if segment_ids else -1
         max_observed_intra_pos_id = max(intra_line_pos_ids) if intra_line_pos_ids else -1
 
@@ -161,7 +153,7 @@ def tokenize_data_full():
             'token_ids': torch.tensor(token_ids, dtype=torch.long),
             'segment_ids': torch.tensor(segment_ids, dtype=torch.long),
             'intra_line_pos_ids': torch.tensor(intra_line_pos_ids, dtype=torch.long),
-            'song_name': song_name # Keep song name for potential debugging
+            'song_name': song_name 
         })
 
     print(f"Tokenization finished. Successfully prepared {len(tokenized_songs_for_dataset)} songs for the FULL dataset.")
@@ -172,8 +164,7 @@ def tokenize_data_full():
         print("ERROR: No songs were successfully tokenized and validated. Cannot create train/val splits for FULL dataset.")
         return
 
-    # Shuffle before splitting, if not already shuffled during selection
-    if not (max_songs_for_full > 0 and len(all_song_instances) > max_songs_for_full): # Only shuffle if we used all songs
+    if not (max_songs_for_full > 0 and len(all_song_instances) > max_songs_for_full): 
         random.shuffle(tokenized_songs_for_dataset)
 
 
@@ -197,12 +188,10 @@ def tokenize_data_full():
     if val_data_list:
         print(f"Saving FULL validation data to: {val_output_path}")
         torch.save(val_data_list, val_output_path)
-    elif val_split_ratio_for_full > 0: # Only warn if we expected val data
+    elif val_split_ratio_for_full > 0: 
         print(f"Warning: No validation data to save for FULL model (list is empty, val_split_ratio={val_split_ratio_for_full}).")
     
     print("FULL data tokenization and saving process complete.")
 
 if __name__ == "__main__":
-    # Example: Set a seed for reproducibility if sampling/shuffling
-    # random.seed(1234) 
     tokenize_data_full()

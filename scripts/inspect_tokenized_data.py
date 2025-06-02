@@ -2,177 +2,148 @@ import torch
 import os
 import argparse
 import sys
-from typing import List, Dict, Any, Optional # Added Optional
 
-# Ensure the project root is in the Python path
-sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '../')))
+# --- BEGIN TEMPORARY PATH FIX (for direct script execution) ---
+# Get the absolute path of the project root directory
+# This assumes this script is in the 'scripts/' directory,
+# and the 'beefai' package is one level up.
+project_root = os.path.abspath(os.path.join(os.path.dirname(__file__), '..'))
+if project_root not in sys.path:
+    sys.path.insert(0, project_root)
+# --- END TEMPORARY PATH FIX ---
 
-# Attempt to import FlowTokenizer, but make it optional for basic inspection
 try:
     from beefai.flow_model.tokenizer import FlowTokenizer
-    TOKENIZER_AVAILABLE = True
 except ImportError:
-    TOKENIZER_AVAILABLE = False
-    print("Warning: FlowTokenizer not found. Token decoding will not be available.")
-    print("Ensure beefai package is in PYTHONPATH if you need token decoding.")
+    FlowTokenizer = None
+    print("Warning: FlowTokenizer could not be imported. Decoding will not be available.")
+    print("Ensure 'beefai' is in PYTHONPATH or run from project root if using a package structure.")
 
-
-def inspect_pt_file(file_path: str, tokenizer_config_path: Optional[str] = None, num_sequences_to_show: int = 3, show_tokens: bool = False, max_tokens_to_decode: int = 50):
-    """
-    Inspects a .pt file containing tokenized song data.
-
-    Args:
-        file_path (str): Path to the .pt file (e.g., train_lite.pt).
-        tokenizer_config_path (str, optional): Path to the FlowTokenizer config JSON.
-                                              Required if show_tokens is True.
-        num_sequences_to_show (int): Number of song sequences to display details for.
-        show_tokens (bool): If True, attempts to decode and print the first few tokens.
-        max_tokens_to_decode (int): Max number of tokens to decode and show per sequence.
-    """
-    if not os.path.exists(file_path):
-        print(f"Error: File not found at {file_path}")
+def inspect_data(data_file_path, tokenizer_config_path=None, num_items_to_inspect=5, decode_tokens=False, max_tokens_to_decode=100):
+    if not os.path.exists(data_file_path):
+        print(f"Error: Data file not found at {data_file_path}")
         return
 
-    print(f"\n--- Inspecting: {file_path} ---")
-    
+    print(f"--- Inspecting: {data_file_path} ---")
     try:
-        # Ensure weights_only=False for loading lists of dicts with tensors
-        data: List[Any] = torch.load(file_path, weights_only=False) 
-    except Exception as e:
-        print(f"Error loading file {file_path}: {e}")
-        return
-
-    if not isinstance(data, list):
-        print(f"Error: Expected data to be a list of dictionaries, but got type {type(data)}.")
-        if hasattr(data, 'keys'): # Check if it's a single dictionary (older format perhaps)
-            print(f"  It appears to be a single dictionary with keys: {list(data.keys())}")
-            print("  Assuming this single dictionary is the item to inspect.")
-            data = [data] # Wrap it in a list to proceed
-        else:
-            return # Cannot proceed if not list or adaptable dict
-    
-    num_total_sequences = len(data)
-    print(f"Total items (song sequences/elements) in the list: {num_total_sequences}")
-
-    if num_total_sequences == 0:
-        print("File contains an empty list.")
-        return
-
-    tokenizer_instance = None
-    if show_tokens and TOKENIZER_AVAILABLE:
-        if tokenizer_config_path:
-            if os.path.exists(tokenizer_config_path):
-                try:
-                    tokenizer_instance = FlowTokenizer(config_path=tokenizer_config_path)
-                    print(f"Tokenizer loaded from {tokenizer_config_path} for decoding.")
-                except Exception as e:
-                    print(f"Error loading tokenizer from {tokenizer_config_path}: {e}. Token decoding disabled.")
-                    show_tokens = False
-            else:
-                print(f"Warning: Tokenizer config path '{tokenizer_config_path}' not found. Cannot decode tokens.")
-                show_tokens = False
-        else:
-            print("Warning: Tokenizer config path not provided. Cannot decode tokens.")
-            show_tokens = False
-
-
-    for i in range(min(num_sequences_to_show, num_total_sequences)):
-        print(f"\n--- Item {i+1} / {num_total_sequences} ---")
-        sequence_data_item = data[i]
+        # Load data, ensuring it works whether it's a list of dicts or a single dict
+        loaded_data = torch.load(data_file_path, weights_only=False) # Important for list of dicts
         
-        print(f"  Type of item: {type(sequence_data_item)}")
-
-        if isinstance(sequence_data_item, dict):
-            print(f"  Keys in dictionary: {list(sequence_data_item.keys())}")
+        if isinstance(loaded_data, dict): # Handle if it's a single dict (older format?)
+            data_list = [loaded_data]
+        elif isinstance(loaded_data, list):
+            data_list = loaded_data
+        else:
+            print(f"Error: Loaded data is not a list or a dictionary. Type: {type(loaded_data)}")
+            return
             
-            song_name = sequence_data_item.get('song_name', 'N/A')
+        if not data_list:
+            print("The loaded data list is empty.")
+            return
+
+        print(f"Total items (song sequences/elements) in the list: {len(data_list)}\n")
+
+        tokenizer_instance = None
+        if decode_tokens:
+            if FlowTokenizer is None:
+                print("Cannot decode tokens: FlowTokenizer class not available.")
+                decode_tokens = False
+            elif tokenizer_config_path and os.path.exists(tokenizer_config_path):
+                tokenizer_instance = FlowTokenizer(config_path=tokenizer_config_path)
+                print(f"Tokenizer loaded from {tokenizer_config_path} for decoding. Vocab size: {tokenizer_instance.get_vocab_size()}")
+            else:
+                print(f"Warning: Tokenizer config path '{tokenizer_config_path}' not provided or not found. Cannot decode tokens.")
+                decode_tokens = False
+        
+        items_to_show = min(num_items_to_inspect, len(data_list))
+
+        for i in range(items_to_show):
+            item = data_list[i]
+            print(f"--- Item {i+1} / {len(data_list)} ---")
+            if not isinstance(item, dict):
+                print(f"  Item is not a dictionary. Type: {type(item)}")
+                continue
+
+            print(f"  Type of item: {type(item)}")
+            print(f"  Keys in dictionary: {list(item.keys())}")
+
+            song_name = item.get('song_name', 'N/A')
             print(f"    Song Name (if present): {song_name}")
 
-            for key, value in sequence_data_item.items():
+            for key, value in item.items():
                 if key == 'song_name': continue # Already printed
 
                 print(f"    Key: '{key}'")
-                print(f"      Value type: {type(value)}")
                 if isinstance(value, torch.Tensor):
+                    print(f"      Value type: {type(value)}")
                     print(f"      Value shape: {value.shape}, dtype: {value.dtype}")
                     if value.numel() > 0: # Check if tensor is not empty
-                         print(f"        Min: {value.min().item():.2f}, Max: {value.max().item():.2f}, Mean: {value.float().mean().item():.2f}")
+                        try:
+                            min_val = value.min().item()
+                            max_val = value.max().item()
+                            mean_val = value.float().mean().item()
+                            print(f"        Min: {min_val:.2f}, Max: {max_val:.2f}, Mean: {mean_val:.2f}")
+                        except RuntimeError as e:
+                            print(f"        Could not compute stats (min/max/mean): {e}")
                     else:
                         print("        Tensor is empty.")
-                elif isinstance(value, list):
-                    print(f"      Value is a list of length: {len(value)}")
-                    if value:
-                        print(f"        Type of first element in list: {type(value[0])}")
-                elif isinstance(value, (str, int, float, bool)):
-                     print(f"      Value: {str(value)[:100]}{'...' if len(str(value)) > 100 else ''}")
-                # Add more type checks if needed (e.g., nested dicts)
-
-            # Specific checks for expected tokenization keys
-            token_ids = sequence_data_item.get('token_ids')
-            segment_ids = sequence_data_item.get('segment_ids')
-            intra_line_pos_ids = sequence_data_item.get('intra_line_pos_ids')
-
-            # Check token_ids
-            if token_ids is not None:
-                if isinstance(token_ids, torch.Tensor):
-                    print(f"    Found 'token_ids': shape {token_ids.shape}, dtype {token_ids.dtype}, length {len(token_ids)}")
-                    if show_tokens and tokenizer_instance and len(token_ids) > 0:
-                        print(f"      First {min(len(token_ids), max_tokens_to_decode)} tokens (decoded):")
-                        decoded_tokens_str_list = []
-                        for k_idx in range(min(len(token_ids), max_tokens_to_decode)):
-                            tok_id = token_ids[k_idx].item()
-                            tok_str = tokenizer_instance.id_to_token.get(tok_id, f"[ID:{tok_id}]")
-                            decoded_tokens_str_list.append(tok_str)
-                        print(f"        {' '.join(decoded_tokens_str_list)}")
                 else:
-                    print(f"    Found 'token_ids', but it's not a Tensor. Type: {type(token_ids)}")
-            else:
-                print("    'token_ids': Not found as a key.")
-
-            # Check segment_ids
-            if segment_ids is not None:
-                if isinstance(segment_ids, torch.Tensor):
-                     max_seg_val_str = str(torch.max(segment_ids).item()) if len(segment_ids) > 0 else 'N/A'
-                     print(f"    Found 'segment_ids': shape {segment_ids.shape}, dtype {segment_ids.dtype}, max_val {max_seg_val_str}")
-                else:
-                    print(f"    Found 'segment_ids', but it's not a Tensor. Type: {type(segment_ids)}")
-            else:
-                print("    'segment_ids': Not found as a key.")
-
-            # Check intra_line_pos_ids
-            if intra_line_pos_ids is not None:
-                if isinstance(intra_line_pos_ids, torch.Tensor):
-                    max_intra_val_str = str(torch.max(intra_line_pos_ids).item()) if len(intra_line_pos_ids) > 0 else 'N/A'
-                    print(f"    Found 'intra_line_pos_ids': shape {intra_line_pos_ids.shape}, dtype {intra_line_pos_ids.dtype}, max_val {max_intra_val_str}")
-                else:
-                    print(f"    Found 'intra_line_pos_ids', but it's not a Tensor. Type: {type(intra_line_pos_ids)}")
-            else:
-                print("    'intra_line_pos_ids': Not found as a key.")
+                    print(f"      Value type: {type(value)}, Value (first 100 chars): {str(value)[:100]}")
             
-            # Length consistency check
-            if all(x is not None and isinstance(x, torch.Tensor) for x in [token_ids, segment_ids, intra_line_pos_ids]):
-                if not (len(token_ids) == len(segment_ids) == len(intra_line_pos_ids)):
-                    print(f"      CRITICAL WARNING: Length mismatch! Tokens: {len(token_ids)}, Segments: {len(segment_ids)}, IntraPos: {len(intra_line_pos_ids)}")
-        
-        elif isinstance(sequence_data_item, torch.Tensor):
-            print(f"  Item is a Tensor: shape {sequence_data_item.shape}, dtype {sequence_data_item.dtype}")
-        else:
-            print(f"  Item is of an unexpected type. Value (first 100 chars): {str(sequence_data_item)[:100]}")
+            # Sanity checks
+            token_ids = item.get('token_ids')
+            segment_ids = item.get('segment_ids')
+            intra_line_pos_ids = item.get('intra_line_pos_ids')
 
+            if isinstance(token_ids, torch.Tensor):
+                print(f"    Found 'token_ids': shape {token_ids.shape}, dtype {token_ids.dtype}, length {len(token_ids)}")
+                if decode_tokens and tokenizer_instance:
+                    print(f"      Decoded first {max_tokens_to_decode} tokens:")
+                    decoded_sequence = [tokenizer_instance.id_to_token.get(tok_id.item(), f"[UNK_ID:{tok_id.item()}]") for tok_id in token_ids[:max_tokens_to_decode]]
+                    
+                    # Print with structure highlighting [SEP_INPUT_FLOW] and [LINE_START]
+                    current_line_str = "        "
+                    for token_str in decoded_sequence:
+                        current_line_str += token_str + " "
+                        if token_str == tokenizer_instance.id_to_token.get(tokenizer_instance.sep_input_flow_token_id) or \
+                           token_str == tokenizer_instance.id_to_token.get(tokenizer_instance.line_start_token_id) or \
+                           token_str == tokenizer_instance.id_to_token.get(tokenizer_instance.end_syllable_sequence_token_id) or \
+                           token_str == tokenizer_instance.id_to_token.get(tokenizer_instance.bar_start_token_id):
+                            print(current_line_str.rstrip())
+                            current_line_str = "        "
+                        elif len(current_line_str) > 120: # Max line length for console
+                            print(current_line_str.rstrip())
+                            current_line_str = "        "
+                    if current_line_str.strip(): # Print any remaining part
+                        print(current_line_str.rstrip())
+                    print("      ---")
+
+
+            if isinstance(segment_ids, torch.Tensor) and segment_ids.numel() > 0:
+                print(f"    Found 'segment_ids': shape {segment_ids.shape}, dtype {segment_ids.dtype}, max_val {segment_ids.max().item()}")
+            if isinstance(intra_line_pos_ids, torch.Tensor) and intra_line_pos_ids.numel() > 0:
+                print(f"    Found 'intra_line_pos_ids': shape {intra_line_pos_ids.shape}, dtype {intra_line_pos_ids.dtype}, max_val {intra_line_pos_ids.max().item()}")
+
+            # Length consistency check
+            if isinstance(token_ids, torch.Tensor) and isinstance(segment_ids, torch.Tensor) and isinstance(intra_line_pos_ids, torch.Tensor):
+                if not (len(token_ids) == len(segment_ids) == len(intra_line_pos_ids)):
+                    print(f"    WARNING: Length mismatch! Tokens: {len(token_ids)}, Segments: {len(segment_ids)}, IntraPos: {len(intra_line_pos_ids)}")
+            print("")
+
+
+    except FileNotFoundError:
+        print(f"Error: Data file not found: {data_file_path}")
+    except Exception as e:
+        print(f"An error occurred: {e}")
 
 if __name__ == "__main__":
-    parser = argparse.ArgumentParser(description="Inspect tokenized .pt data files (e.g., train_lite.pt, train_full.pt).")
-    parser.add_argument("file_path", type=str, help="Path to the .pt file to inspect.")
-    parser.add_argument("--tokenizer_config", type=str, default="beefai/flow_model/flow_tokenizer_config_v2.json",
-                        help="Path to the FlowTokenizer config JSON file (for decoding tokens). Default: %(default)s")
-    parser.add_argument("--num_seq", type=int, default=3, help="Number of items/sequences to display details for. Default: %(default)s")
-    parser.add_argument("--show_tokens", action="store_true", help="Attempt to decode and show initial tokens if possible.")
-    parser.add_argument("--max_decode", type=int, default=50, help="Max number of tokens to decode per sequence if --show_tokens is used. Default: %(default)s")
-
+    parser = argparse.ArgumentParser(description="Inspect tokenized data .pt files.")
+    parser.add_argument("--data_file", type=str, required=True, help="Path to the .pt data file to inspect.")
+    parser.add_argument("--tokenizer_config", type=str, default=None, help="Optional path to the FlowTokenizer config JSON for decoding tokens.")
+    parser.add_argument("--num_items_to_inspect", type=int, default=3, help="Number of items (songs/sequences) from the list to inspect.")
+    parser.add_argument("--decode_tokens", action='store_true', help="Flag to decode and print token sequences if tokenizer_config is provided.")
+    parser.add_argument("--max_tokens_to_decode", type=int, default=150, help="Max number of tokens to decode and print per item.")
+    
     args = parser.parse_args()
-
-    inspect_pt_file(args.file_path, 
-                    tokenizer_config_path=args.tokenizer_config, 
-                    num_sequences_to_show=args.num_seq, 
-                    show_tokens=args.show_tokens,
-                    max_tokens_to_decode=args.max_decode)
+    
+    inspect_data(args.data_file, args.tokenizer_config, args.num_items_to_inspect, args.decode_tokens, args.max_tokens_to_decode)

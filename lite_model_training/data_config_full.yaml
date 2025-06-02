@@ -9,17 +9,23 @@ tokenizer_path: "beefai/flow_model/flow_tokenizer_config_v2.json"
 # --- Inputs for 05b_tokenize_data_full.py ---
 # Source of processed data from scripts/preprocess_dataset.py (shared with lite).
 processed_data_source_dir: "data/processed_for_transformer/"
+processed_data_filename: "processed_training_data.pt" # Explicitly name the file
 
 # --- Outputs for 05b_tokenize_data_full.py ---
 # These .pt files will contain tokenized data ready for FlowDataset for the full model.
 # These paths are also used as inputs by scripts/train_flow_model.py.
 tokenized_data_output_dir: "data/tokenized_full/" # Base directory for full tokenized data
+train_data_filename: "train_full.pt" # Filename for training data within tokenized_data_output_dir
+val_data_filename: "val_full.pt"   # Filename for validation data
+# Full paths for convenience if scripts need them directly (optional, can be constructed)
 train_data_path: "data/tokenized_full/train_full.pt"
 val_data_path: "data/tokenized_full/val_full.pt"
+
 
 # --- Parameters for 05b_tokenize_data_full.py ---
 max_songs_for_full: -1 # Number of songs to select. -1 means use all available songs.
 val_split_ratio_for_full: 0.1 # Proportion of selected songs to use for validation (e.g., 10%)
+random_seed_data_split: 42 # Seed for shuffling data before train/val split, if applicable
 
 # --- Checkpoint directory for scripts/train_flow_model.py ---
 checkpoint_dir: "data/checkpoints/flow_model_full/"
@@ -28,7 +34,7 @@ checkpoint_dir: "data/checkpoints/flow_model_full/"
 sample_rate: 44100
 n_fft: 2048
 hop_length: 512
-win_length: 2048
+win_length: 2048 # Often same as n_fft
 n_mels: 128
-fmin: 0
-fmax: 16000
+fmin: 0 # For Mel spectrograms
+fmax: 16000 # For Mel spectrograms, often sr/2, but 16k is also common

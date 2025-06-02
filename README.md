@@ -2,11 +2,11 @@
 
 ## Project Overview
 
-**beefai** is an ambitious project to create an AI-powered rap battle game. The core goal is to develop a system where an AI can generate and perform rap verses in real-time, responding to a user's rap input, all while staying on beat with a provided instrumental track. This involves modeling rap "flow" (rhythm, timing, and articulation), generating contextually relevant and rhythmically fitting lyrics, and synthesizing these lyrics into an audible rap performance.
+**beefai** is an ambitious project to create an AI-powered rap battle game. The core goal is to develop a system where an AI can generate and perform rap verses in real-time, responding to a user's rap input, all while staying on beat with a provided instrumental track. This involves modeling rap "flow" (rhythm, timing, stress, and articulation), generating contextually relevant and rhythmically fitting lyrics, and synthesizing these lyrics into an audible rap performance.
 
 This project directly addresses the paradigm of **continuous, conditioned generation**:
 *   **Prompt-based generation:** The AI generates rap based on the "prompt" of the user's preceding verse and the musical context.
-*   **Continuous control:** The AI's generation is continuously conditioned by the beat and the evolving lyrical context of the battle.
+*   **Continuous control:** The AI's generation is continuously conditioned by the beat, musical features (like stress and energy), and the evolving lyrical context of the battle.
 
 ## AI Rap Battle Generation Pipeline
 
@@ -28,34 +28,34 @@ graph TD
 
     %% Initial Processing
     subgraph "Input Processing & Feature Extraction"
-        A1 --> B1[Beat Analysis Engine\n(e.g., librosa, madmom)];
-        B1 --> C1[Beat Features Data\n- Tempo, Time Signature\n- Beat Positions (Upbeats, Downbeats)\n- Rhythm Characteristics\n- Musical Key/Scale (optional)];
+        A1 --> B1[Beat Analysis Engine\n(beefai.data_processing.BeatFeatureExtractor)];
+        B1 --> C1[Beat Features Data\n- Tempo, Time Signature\n- Beat/Bar Timings\n- Quantized Percussive Events (Kick, Snare, Hihat, Bass)];
         class B1 process;
         class C1 data;
 
-        A2 --> B2[User Voice Processing Engine\n(ASR, Feature Extraction)];
-        B2 --> C2[User Rap Transcript & Features\n- Transcribed User Lyrics (ASR)\n- Emotion Analysis (optional)\n- Vocal Characteristics (optional)];
+        A2 --> B2[User Voice Processing Engine\n(ASR, beefai.data_processing.FlowDataExtractor)];
+        B2 --> C2[User Rap Transcript & Flow Features\n- Transcribed User Lyrics (from ASR alignment)\n- Syllable Counts, Timings, Stress (FlowData)];
         class B2 process;
         class C2 data;
     end
 
     %% Core AI Generation Pipeline
     subgraph "AI Rap Generation Core"
-        C1 --> M1[Flow Generation Model\n(Custom ML Model)];
-        M1 --> D1[Generated Flow Data\n- Sequence: (start_time, duration_sec, \n pitch_contour_id, syllables_target)\n- Normalized to beat/bar structure];
+        C1 --> M1[Flow Generation Model\n(beefai.flow_model.FlowTransformerDecoder)];
+        M1 --> D1[Generated AI FlowData\n- Sequence: (bar_idx, line_idx, syllables, \n offset_beats, duration_beats, \n syllable_starts, syllable_durations, syllable_stresses)\n- Normalized to beat/bar structure];
         class M1 model;
         class D1 data;
         
-        CTX_LLM[Lyric Generation LLM\n(e.g., Fine-tuned Transformer)];
-        C2 --> CTX_LLM; %% User Transcript to LLM
-        C1 --> CTX_LLM; %% Beat Features to LLM (for context)
-        D1 --> CTX_LLM; %% Flow Data to LLM (for structure)
-        CTX_LLM --> D2[AI Generated Lyrics\n- Contextually relevant\n- Rhyming\n- Fits syllable/rhythm structure from Flow Data];
+        CTX_LLM[Lyric Generation LLM\n(e.g., Fine-tuned Transformer, using beefai.lyric_generation.LyricAgent)];
+        C2 --> CTX_LLM; %% User Transcript (or summary) to LLM
+        C1 --> CTX_LLM; %% Beat Features to LLM (for context/energy)
+        D1 --> CTX_LLM; %% AI Flow Data to LLM (for lyrical structure)
+        CTX_LLM --> D2[AI Generated Lyrics\n- Contextually relevant\n- Rhyming\n- Fits syllable/rhythm/stress structure from AI Flow Data];
         class CTX_LLM model;
         class D2 data;
 
-        D2 --> M3[Speech Synthesis Model\n(TTS/SVS, e.g., Vocaloid-based, DiffSVC)];
-        D1 --> M3; %% Flow Data to TTS/SVS (for prosody)
+        D2 --> M3[Speech Synthesis Model\n(TTS/SVS, e.g., beefai.synthesis.RapSynthesizer)];
+        D1 --> M3; %% AI Flow Data to TTS/SVS (for prosody and timing)
         M3 --> O1[Generated AI Rap Audio\n(Waveform)];
         class M3 model;
         class O1 data;
@@ -64,288 +64,7 @@ graph TD
     %% Outputs
     subgraph "Final Outputs & User Feedback"
         O1 --> F1[/AI Rap Audio File (MP3/WAV)/];
-        D1 --> F2[/Live Beat/Syllable Counter\n(Visual Feedback to User)/];
+        D1 --> F2[/Live Beat/Syllable Counter & Visualizer\n(Visual Feedback to User, e.g., beefai.evaluation.RhythmVisualizer)/];
         C1 --> F2; 
         class F1,F2 output;
     end
-```
-
-Okay, let's outline a key implementation plan for the Decoder-only Transformer for Flow Generation, focusing on the specified data engineering pipeline.
-
-## Thinking Phase:
-
-1.  **Deconstruct the Request:**
-    *   **Model:** Decoder-only Transformer.
-    *   **Task:** Generate rap flow (`FlowData` sequence).
-    *   **Input Conditioning (Beat Features):**
-        *   Tempo.
-        *   Time Signature.
-        *   Bass/drum events: List of numbers (1-16) indicating active subdivisions in a measure. This needs to be specified per instrument (bass, kick, snare, hi-hat). So, for each bar, we'll have 4 lists of active subdivisions or 4 binary vectors of length 16.
-        *   "Events (option b) of significant sources of sound that indicate a pattern": This implies a more symbolic representation of percussive events rather than just a raw grid. For example, `(instrument, subdivision_index)`.
-    *   **Output `FlowData` (Target):**
-        *   Sequence of `FlowDatum`: `(bar_index, line_index_in_bar, syllables, start_offset_beats, duration_beats)`.
-        *   *Explicitly ignore pitch contours for now.*
-    *   **Core Challenge:** Representing the diverse input (continuous tempo, categorical time sig, sparse event lists/grids for percussion) and output (integers for syllables, quantized continuous for timing) in a way a Transformer can consume and produce.
-
-2.  **Data Pipeline - Key Stages:**
-    *   **Acquisition:** Acapellas, Instrumentals (ideally stems or good quality for separation), Lyrics.
-    *   **Beat Feature Extraction (Model Input):**
-        *   Process instrumentals.
-        *   Get Tempo, Time Signature.
-        *   Percussion Analysis: This is key. Need to get events for bass, kick, snare, hi-hat.
-            *   Source separation is almost mandatory here (e.g., Demucs, Spleeter).
-            *   For each separated stem (bass, drums):
-                *   Onset detection.
-                *   For drums, further classification (kick, snare, hi-hat) if possible. This can be tricky; heuristics or simple classifiers might be needed.
-                *   Map onsets to 16 subdivisions of a bar.
-    *   **Flow Data Extraction (Model Target):**
-        *   Process acapellas and lyrics.
-        *   Forced alignment (crucial).
-        *   Syllabification.
-        *   Segmentation into lines/phrases.
-        *   Quantization of timing information (start offset, duration) into discrete bins.
-    *   **Tokenization & Dataset Assembly:**
-        *   Define a vocabulary that covers all input features and output flow elements.
-        *   Structure into `(input_sequence, target_sequence)` pairs for the Transformer.
-
-3.  **Decoder-Only Transformer - Key Aspects:**
-    *   **Input Format:** A single sequence combining beat features and (for training) target flow elements.
-    *   **Output Format:** Autoregressive generation of flow element tokens.
-    *   **Architecture:** Standard Transformer decoder blocks.
-    *   **Masking:** Causal attention mask.
-
-4.  **Implementation Plan Structure:**
-    *   Phase 0: Setup & Prerequisites
-    *   Phase 1: Data Collection & Initial Processing
-    *   Phase 2: Beat Feature Engineering (Model Input)
-    *   Phase 3: Flow Data Engineering (Model Target)
-    *   Phase 4: Tokenization & Dataset Assembly
-    *   Phase 5: Decoder-Only Transformer Model Implementation
-    *   Phase 6: Training & Initial Evaluation
-    *   Phase 7: Iteration and Refinement
-
-## Key Implementation Plan: Flow Generation (Decoder-Only Transformer)
-
-This plan focuses on getting a first version of the flow generation model working, ignoring pitch contours and using the specified beat features.
-
----
-
-**Phase 0: Setup & Prerequisites**
-
-1.  **Environment:**
-    *   Confirm Python environment with necessary base libraries (`numpy`, `pandas`).
-    *   Install core ML/audio libraries: `torch` (or `tensorflow`), `librosa`, `pydub`, `pyphen`.
-    *   Install/setup source separation tools (e.g., `demucs`).
-    *   Install/setup a forced aligner (e.g., Montreal Forced Aligner - MFA).
-2.  **Version Control:** Initialize Git repository.
-3.  **Initial Data Staging Area:** Create directories for raw audio, processed data, etc.
-
----
-
-**Phase 1: Data Collection & Initial Processing (Iterative)**
-
-1.  **Gather Raw Data:**
-    *   **Source:** Acapellas (cleanest possible), corresponding instrumentals, and lyrics.
-    *   **Target:** Aim for at least 50-100 songs initially, more is better. Prioritize songs with clear rhythmic structures.
-    *   **Organization:** Store systematically (e.g., `data/raw/song_id/acapella.wav`, `data/raw/song_id/instrumental.wav`, `data/raw/song_id/lyrics.txt`).
-2.  **Basic Audio Normalization:**
-    *   Convert all audio to a consistent format (e.g., WAV, 44.1kHz, mono for acapellas, stereo/mono for instrumentals).
-    *   Normalize volume levels if highly variable.
-    *   **Tools:** `librosa`, `pydub`, `ffmpeg`.
-
----
-
-**Phase 2: Beat Feature Engineering (Model Input)**
-
-*Goal: For each instrumental, extract per-bar features: Tempo, Time Signature, and percussive event locations for bass, kick, snare, hi-hat.*
-
-1.  **Audio Pre-processing for Instrumentals:**
-    *   Load instrumental audio.
-2.  **Global Feature Extraction:**
-    *   **Tempo (BPM):** `librosa.beat.tempo`. Store one value per song (or segment if tempo changes).
-    *   **Time Signature:** `librosa.beat.beat_track` (can infer from beat groupings). Assume 4/4 if detection is unreliable initially.
-3.  **Bar Segmentation:**
-    *   Detect beats and downbeats: `librosa.beat.beat_track`.
-    *   Group beats into bars based on time signature. Store bar start/end times.
-4.  **Percussive Source Separation (per song):**
-    *   Apply source separation (e.g., `demucs`) to instrumentals to get:
-        *   `bass` stem
-        *   `drums` stem
-    *   If `demucs` provides `kick`, `snare`, `hihat` directly, use those. Otherwise, the `drums` stem will need further processing.
-5.  **Percussive Event Detection & Grid Creation (per bar, per instrument):**
-    *   For each bar and for each target instrument stem (`bass`, and from `drums`: `kick`, `snare`, `hi-hat`):
-        *   **Onset Detection:** `librosa.onset.onset_detect` on the instrument stem within the bar's time window.
-        *   **(If processing generic `drums` stem for K/S/HH):**
-            *   *Heuristic Classification (Initial):* Apply simple frequency-based rules or a pre-trained basic drum sound classifier to categorize drum onsets into kick, snare, hi-hat. This is a challenging step; aim for "good enough" initially.
-            *   *Alternative:* Use a tool specifically for drum transcription if available and feasible.
-        *   **Quantization to 16 Subdivisions:**
-            *   For each detected (and classified, if needed) onset time:
-                *   Calculate its position within the bar (0.0 to 1.0).
-                *   Map this to one of 16 subdivisions (e.g., `subdivision_index = floor(position_in_bar * 16)`).
-            *   **Output per bar:**
-                *   `kick_events`: List of active subdivision indices (0-15) for kicks.
-                *   `snare_events`: List of active subdivision indices for snares.
-                *   `hihat_events`: List of active subdivision indices for hi-hats.
-                *   `bass_events`: List of active subdivision indices for bass.
-6.  **Data Storage:**
-    *   Store these extracted features in a structured format (e.g., JSON files, one per song, mapping bar index to its features).
-    *   Example per bar:
-        ```json
-        {
-          "bar_index": 0,
-          "bpm": 120.0,
-          "time_signature": [4, 4],
-          "kick_events": [0, 4, 8, 12], // kick on 1st, 5th, 9th, 13th 16th-note
-          "snare_events": [4, 12],      // snare on 5th, 13th 16th-note
-          "hihat_events": [0, 2, 4, 6, 8, 10, 12, 14], // 8th note hi-hats
-          "bass_events": [0, 8]
-        }
-        ```
-
----
-
-**Phase 3: Flow Data Engineering (Model Target)**
-
-*Goal: For each acapella, extract a sequence of `FlowDatum` (line/phrase level) containing syllables, start offset, and duration, all normalized to beats.*
-
-1.  **Acapella Pre-processing:**
-    *   Load acapella audio.
-2.  **Forced Alignment:**
-    *   Use MFA (or similar) with acapella audio and corresponding lyrics to get word-level (and ideally phoneme-level) timestamps. *This is critical for accuracy.*
-    *   **Output:** Structured alignment data (e.g., Praat TextGrids, JSON).
-3.  **Syllabification & Timestamp Propagation:**
-    *   For each word from alignment:
-        *   Break into syllables using `pyphen`.
-        *   Distribute word duration among its syllables (e.g., equally, or more sophisticated heuristics if phoneme timestamps are good). Get start/end time for each syllable.
-4.  **Segmentation into Lines/`FlowDatum`:**
-    *   **Define "Line":** Decide on a heuristic. E.g.:
-        *   Fixed number of bars (e.g., every 2 bars forms a "line" segment for flow).
-        *   Silence-based: Group syllables between significant pauses in the acapella.
-    *   Iterate through syllables, grouping them into these defined lines/segments.
-5.  **`FlowDatum` Creation (per line/segment):**
-    *   For each segment:
-        *   `bar_index`, `line_index_in_bar`: Determined by the segmentation logic and downbeat times from the *instrumental's beat analysis*.
-        *   `syllables`: Count of syllables in this segment.
-        *   `segment_start_time_sec`: Start time of the first syllable in the segment.
-        *   `segment_end_time_sec`: End time of the last syllable in the segment.
-        *   **Beat Normalization (using BPM from Beat Features):**
-            *   `beat_duration_sec = 60.0 / bpm`
-            *   `bar_start_time_sec`: Get the start time of the bar this segment falls into (from instrumental beat analysis).
-            *   `start_offset_beats = (segment_start_time_sec - bar_start_time_sec) / beat_duration_sec`
-            *   `duration_beats = (segment_end_time_sec - segment_start_time_sec) / beat_duration_sec`
-6.  **Quantization for Transformer:**
-    *   **Syllables:** Treat as an integer. Consider if capping at a max (e.g., 24) is needed for vocabulary size.
-    *   **`start_offset_beats` & `duration_beats`:** Quantize into discrete bins.
-        *   Example: Resolution of 0.25 beats. `start_offset_beats` could range 0 to `beats_per_bar - 0.25`. `duration_beats` could range 0.25 up to, say, 8 beats (if a line can span 2 bars).
-        *   Define bin edges and map continuous values to bin indices.
-7.  **Data Storage:**
-    *   Store as a sequence of `FlowDatum` objects (or dictionaries) per song, linked to the beat features.
-    *   Example `FlowDatum` (after quantization, conceptual):
-        ```json
-        {
-          "bar_index": 0, // The bar this line primarily starts in or belongs to
-          "line_index_in_bar": 0, // If multiple lines per bar segment
-          "syllables_val": 12,
-          "start_offset_beats_bin": 0, // e.g., bin for 0.0 beats from bar start
-          "duration_beats_bin": 7     // e.g., bin for 2.0 beats duration
-        }
-        ```
-
----
-
-**Phase 4: Tokenization & Dataset Assembly**
-
-1.  **Define Vocabulary:**
-    *   **Special Tokens:** `[PAD]`, `[BOS]` (Begin Of Sequence), `[EOS]` (End Of Sequence), `[SEP_INPUT_TARGET]` (separates beat input from flow target in the combined sequence), `[BAR_START_MARKER]`, `[LINE_START_MARKER]`.
-    *   **Beat Feature Tokens:**
-        *   `[BPM_XXX]` (e.g., `[BPM_120]`, `[BPM_121]`, or quantized BPM ranges like `[BPM_118_122]`).
-        *   `[TIMESIG_4_4]`, `[TIMESIG_3_4]`.
-        *   For each instrument (`kick`, `snare`, `hihat`, `bass`):
-            *   A token for each active subdivision: `[KICK_SUBDIV_0]`, ..., `[KICK_SUBDIV_15]`.
-            *   Alternatively, to keep sequences shorter: A single token per instrument per bar representing its pattern (e.g., `[KICK_PATTERN_ID_XYZ]`). This requires pre-clustering patterns or handling a very large vocabulary if patterns are diverse. *Let's start with explicit subdivision tokens for presence/absence, e.g., `[KICK_ON_0]`, `[KICK_OFF_1]`, ... or a sequence of active events `[KICK_AT_0] [KICK_AT_4] [KICK_AT_8] [KICK_AT_12] [END_KICK_EVENTS]`.*
-            *   **Decision for Plan:** Use event list tokens: `[KICK_AT_0]...[END_KICK_EVENTS]`, `[SNARE_AT_4]...[END_SNARE_EVENTS]`, etc. This is flexible.
-    *   **Flow Target Tokens:**
-        *   `[SYLLABLES_1]`, `[SYLLABLES_2]`, ..., `[SYLLABLES_MAX]`.
-        *   `[START_OFFSET_BIN_0]`, ..., `[START_OFFSET_BIN_MAX]`.
-        *   `[DURATION_BIN_0]`, ..., `[DURATION_BIN_MAX]`.
-2.  **Create Tokenizer:** Map tokens to integer IDs and vice-versa.
-3.  **Construct Training Instances:**
-    *   For each song, create a sequence of bars. Each bar will have its beat features followed by its flow data (one or more lines).
-    *   **Input Sequence Format for Transformer (autoregressive training):**
-        `[BOS]`
-        `[BAR_START_MARKER]`
-        `[BPM_XXX]` `[TIMESIG_X_X]`
-        `[KICK_AT_S1] [KICK_AT_S2] ... [END_KICK_EVENTS]`
-        `[SNARE_AT_S1] ... [END_SNARE_EVENTS]`
-        `[HIHAT_AT_S1] ... [END_HIHAT_EVENTS]`
-        `[BASS_AT_S1] ... [END_BASS_EVENTS]`
-        `[SEP_INPUT_TARGET]`
-        `[LINE_START_MARKER]` `[SYLLABLES_S]` `[START_OFFSET_BIN_SO]` `[DURATION_BIN_D]` (for line 1 in bar)
-        `[LINE_START_MARKER]` `[SYLLABLES_S']` `[START_OFFSET_BIN_SO']` `[DURATION_BIN_D']` (for line 2 in bar, if exists)
-        `[BAR_START_MARKER]` (for next bar)
-        ...
-        `[EOS]`
-    *   The model will be trained to predict the next token in this combined sequence. During inference, it predicts tokens after `[SEP_INPUT_TARGET]`.
-4.  **Split Data:** Train, validation, test sets.
-
----
-
-**Phase 5: Decoder-Only Transformer Model Implementation**
-
-1.  **Choose Framework:** PyTorch (Hugging Face Transformers library is excellent here) or TensorFlow/Keras.
-2.  **Model Architecture:**
-    *   **Embedding Layer:** For the defined vocabulary.
-    *   **Positional Encoding:** Sinusoidal or learned.
-    *   **Transformer Decoder Blocks:** Stack of N blocks (each with multi-head self-attention, layer norm, feed-forward network, layer norm).
-    *   **Output Layer:** Linear layer projecting to vocabulary size, followed by Softmax.
-3.  **Masking:**
-    *   Implement causal (look-ahead) mask for self-attention.
-    *   Implement padding mask if using batching with variable length sequences.
-4.  **Configuration:** Hyperparameters (num_layers, num_heads, d_model, d_ff, dropout).
-
----
-
-**Phase 6: Training & Initial Evaluation**
-
-1.  **Loss Function:** Cross-Entropy Loss.
-2.  **Optimizer:** AdamW.
-3.  **Learning Rate Scheduler:** E.g., linear warmup and decay.
-4.  **Training Loop:**
-    *   Feed input sequences to the model.
-    *   Calculate loss between predicted tokens and actual next tokens.
-    *   Backpropagate and update weights.
-5.  **Monitoring:** Track training/validation loss, perplexity, accuracy.
-6.  **Generation/Inference:**
-    *   Provide beat features as a prompt:
-        `[BOS] [BAR_START_MARKER] [BPM_XXX] ... [END_BASS_EVENTS] [SEP_INPUT_TARGET]`
-    *   Autoregressively generate flow tokens until `[EOS]` or max length.
-    *   Decode generated token IDs back to `FlowDatum` representation.
-7.  **Initial Evaluation:**
-    *   **Objective:** Perplexity on validation set.
-    *   **Subjective (Crucial):**
-        *   Take a few input beat patterns.
-        *   Generate multiple flow sequences.
-        *   Manually inspect: Do syllable counts make sense? Do timings seem plausible for rap? Are they varied?
-        *   Use a placeholder TTS (even basic tones with correct timing) to "hear" the rhythm.
-
----
-
-**Phase 7: Iteration and Refinement**
-
-*Based on evaluation from Phase 6:*
-
-1.  **Data Issues:**
-    *   Revisit forced alignment quality.
-    *   Improve percussive event detection/classification.
-    *   Adjust quantization bins for timing if too coarse/fine.
-    *   Augment dataset if sparse in certain rhythmic styles.
-2.  **Tokenization:**
-    *   Is the vocabulary too large/small?
-    *   Are event list tokens (`[KICK_AT_X]`) working well, or is a grid representation better?
-3.  **Model Hyperparameters:** Tune learning rate, model size, dropout, etc.
-4.  **Error Analysis:** Where does the model fail most? (e.g., wrong syllable counts, awkward timings).
-5.  **Consider Adding Pitch:** Once the rhythmic generation is somewhat stable, plan for incorporating pitch contour prediction as another token type in the `FlowDatum`.
-
----
-
-This detailed plan provides a roadmap. Each step, especially in data engineering, can be complex and iterative. Good luck!

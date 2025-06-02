@@ -13,7 +13,6 @@ import traceback
 sys.path.append(os.getcwd())
 
 # --- Virtual Environment Check ---
-# (Keep the venv check as it was)
 try:
     project_root_for_venv_check = os.path.abspath(os.path.join(os.path.dirname(__file__), '..'))
     expected_venv_dir_name = ".venv" 
@@ -30,12 +29,16 @@ try:
     if not is_in_expected_venv:
         print("!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!", flush=True)
         print("! WARNING: This script may not be running from the project's intended      !", flush=True)
-        # ... (rest of warning message, ensuring flush=True for all prints in this block)
+        print("! virtual environment (.venv). Some commands (like whisper_timestamped,    !", flush=True)
+        print("! demucs, audio-separator) might not be found or might use global versions.!", flush=True)
+        print(f"! Expected venv: {expected_venv_path}", flush=True)
+        print(f"! Current sys.executable: {sys.executable}", flush=True)
+        print("! If issues occur, please activate the project's .venv and re-run.        !", flush=True)
         print("!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!", flush=True)
-        skip_prompt = False
-        if 'parsed_args_for_main' in globals() and hasattr(parsed_args_for_main, 'skip_venv_warning_prompt'):
-             skip_prompt = parsed_args_for_main.skip_venv_warning_prompt
-        if not skip_prompt:
+        skip_prompt_local = False # Default to not skipping
+        if 'parsed_args_for_main' in globals() and parsed_args_for_main is not None and hasattr(parsed_args_for_main, 'skip_venv_warning_prompt'):
+             skip_prompt_local = parsed_args_for_main.skip_venv_warning_prompt
+        if not skip_prompt_local:
             print("Press Enter to attempt to continue, or Ctrl+C to exit (auto-proceeds in 5s)...", flush=True)
             try: time.sleep(5); print("Proceeding automatically after timeout.", flush=True)
             except KeyboardInterrupt: print("Exiting due to user interruption.", flush=True); sys.exit(1)
@@ -100,7 +103,7 @@ def run_command(command_list, step_name, working_dir=None, suppress_output=False
         return False
     except Exception as e:
         print(f"ERROR: An unexpected error occurred during '{step_name}' for {' '.join(command_list)}: {e}", flush=True)
-        traceback.print_exc() # Print full traceback for unexpected errors
+        traceback.print_exc() 
         return False
 
 def align_song_worker(acapella_file_info, base_acapellas_dir, output_json_dir, whisper_model_arg, whisper_language_arg, force_rerun_arg):
@@ -154,8 +157,13 @@ def align_song_worker(acapella_file_info, base_acapellas_dir, output_json_dir, w
         elif not temp_sanitized_file_used and os.path.exists(output_json_path): 
             status_to_return = "aligned"
         else: 
-            print(f"ERROR: Alignment command succeeded for {original_acapella_filename}, but expected output JSON not found.", flush=True)
-            status_to_return = "failed_output_missing"
+            # Check if original output name exists (whisper_timestamped might use original name directly)
+            original_output_name = f"{song_name_no_ext_original}.json"
+            if os.path.exists(os.path.join(output_json_dir, original_output_name)):
+                 status_to_return = "aligned"
+            else:
+                print(f"ERROR: Alignment command succeeded for {original_acapella_filename}, but expected output JSON not found (checked {output_json_path} and {expected_output_from_sanitized}).", flush=True)
+                status_to_return = "failed_output_missing"
     
     if temp_sanitized_file_used and os.path.exists(temp_sanitized_path):
         try:
@@ -178,7 +186,7 @@ def run_python_script(script_path_relative_to_scripts_dir, script_name, script_a
         command.extend(script_args)
     
     print(f"DEBUG: run_python_script: Constructed command: {' '.join(command)}", flush=True)
-    success = run_command(command, script_name, suppress_output=False) # Show output for python scripts
+    success = run_command(command, script_name, suppress_output=False) 
     print(f"DEBUG: run_python_script: {script_name} returned: {success}", flush=True)
     return success
 
@@ -190,31 +198,162 @@ def main(args_main_func):
     print("====== Starting Full Data Preparation Pipeline ======", flush=True)
 
     print("\nPHASE 0: Setup", flush=True)
-    # ... (rest of Phase 0 with flush=True on its prints)
+    print("Ensuring Python environment is set up, dependencies installed, and API keys are configured.", flush=True)
+    # Add actual checks here if needed, e.g., for API keys from .env
     if not parsed_args_for_main.skip_setup_prompt:
         print("Press Enter to continue if setup is complete (auto-proceeds in 5s)...", flush=True)
         try: time.sleep(5); print("Proceeding automatically after timeout.", flush=True)
         except KeyboardInterrupt: print("Exiting due to user interruption.", flush=True); sys.exit(1)
 
     if not parsed_args_for_main.skip_data_acquisition:
-        print("\nPHASE 1: Data Acquisition & Organization", flush=True)
+        print("\nPHASE 1: Data Acquisition & Organization (Conceptual)", flush=True)
+        print("  (This phase typically involves manual collection or running download scripts like download_youtube_lyrics.py,", flush=True)
+        print("   followed by organize_downloaded_songs.py. These are not auto-run by default here.)", flush=True)
     else: print("\nSkipping PHASE 1: Data Acquisition & Organization", flush=True)
 
     if not parsed_args_for_main.skip_source_separation:
         print(f"\nPHASE 1b: Source Separation (Using: {parsed_args_for_main.separator_tool})", flush=True)
-        # ... (separation logic with flush=True on its prints) ...
+        os.makedirs(parsed_args_for_main.instrumentals_dir, exist_ok=True)
+        os.makedirs(parsed_args_for_main.acapellas_dir, exist_ok=True)
+        
+        if parsed_args_for_main.separator_tool == "demucs":
+            os.makedirs(parsed_args_for_main.demucs_stem_output_base_dir, exist_ok=True)
+            sep_check_cmd = ["demucs", "--version"]
+        elif parsed_args_for_main.separator_tool == "audio_separator":
+            os.makedirs(parsed_args_for_main.audio_separator_stem_output_base_dir, exist_ok=True)
+            sep_check_cmd = ["audio-separator", "--help"] # audio-separator --version might not exist
+        else:
+            print(f"ERROR: Unknown separator tool: {parsed_args_for_main.separator_tool}", flush=True)
+            return
+
+        print(f"DEBUG: Checking {parsed_args_for_main.separator_tool} availability with: {' '.join(sep_check_cmd)}", flush=True)
+        if not run_command(sep_check_cmd, f"{parsed_args_for_main.separator_tool} check", suppress_output=True, capture_stderr_on_error=True):
+            print(f"ERROR: {parsed_args_for_main.separator_tool} command check failed. Halting.", flush=True)
+            return
+
+        raw_song_files = [f for f in os.listdir(parsed_args_for_main.raw_songs_dir) if f.lower().endswith(('.mp3', '.wav', '.flac', '.m4a'))]
+        print(f"Found {len(raw_song_files)} songs in {parsed_args_for_main.raw_songs_dir} for separation.", flush=True)
+
+        for filename in tqdm(raw_song_files, desc="Separating Sources"):
+            song_path = os.path.join(parsed_args_for_main.raw_songs_dir, filename)
+            song_name_no_ext = os.path.splitext(filename)[0]
+            
+            instrumental_out_path = os.path.join(parsed_args_for_main.instrumentals_dir, f"{song_name_no_ext}.wav")
+            acapella_out_path = os.path.join(parsed_args_for_main.acapellas_dir, f"{song_name_no_ext}.wav")
+
+            if (os.path.exists(instrumental_out_path) and os.path.exists(acapella_out_path)) and not parsed_args_for_main.force_rerun_separation:
+                print(f"  Skipping separation for {filename}, outputs already exist.", flush=True)
+                continue
+            
+            if parsed_args_for_main.separator_tool == "demucs":
+                # Output structure for demucs is typically: out_dir/model_name/song_name_no_ext/{vocals.wav, bass.wav, drums.wav, other.wav}
+                demucs_song_output_dir = os.path.join(parsed_args_for_main.demucs_stem_output_base_dir, parsed_args_for_main.demucs_model, song_name_no_ext)
+                os.makedirs(demucs_song_output_dir, exist_ok=True) # Demucs will create this if -o is used correctly.
+                
+                sep_cmd = ["demucs", "-n", parsed_args_for_main.demucs_model, "-o", parsed_args_for_main.demucs_stem_output_base_dir, "--filename", "{track}/{stem}.{ext}", song_path]
+                # Demucs --filename expects {track} to be the input track name without extension, not the full path.
+                # It will place output in: demucs_stem_output_base_dir / demucs_model / song_name_no_ext / stem.wav
+                
+                if run_command(sep_cmd, f"Demucs Separation for {filename}", suppress_output=True):
+                    # Expected output paths after demucs
+                    expected_demucs_vocals = os.path.join(demucs_song_output_dir, "vocals.wav")
+                    expected_demucs_no_vocals = os.path.join(demucs_song_output_dir, "no_vocals.wav") # if supported, or sum others
+                    
+                    # For instrumentals, we often use "no_vocals" if the model provides it, or sum of (bass, drums, other)
+                    # For this pipeline, BeatFeatureExtractor can use individual stems like bass.wav, drums.wav.
+                    # We need *an* instrumental and *an* acapella for the main data dirs.
+                    if os.path.exists(expected_demucs_vocals):
+                        shutil.copy2(expected_demucs_vocals, acapella_out_path)
+                    else: print(f"Warning: Demucs vocals stem not found for {filename} at {expected_demucs_vocals}", flush=True)
+
+                    # Create instrumental by combining non-vocal stems if 'no_vocals.wav' isn't directly output
+                    # Or simply copy 'other.wav' if that's the desired instrumental proxy for simplicity in this script
+                    # This part can be complex. For now, let's assume a simpler path or that BFE handles stems.
+                    # Here, we just need a file for data/instrumentals. Using 'other.wav' as a proxy if no_vocals isn't available
+                    if os.path.exists(expected_demucs_no_vocals):
+                        shutil.copy2(expected_demucs_no_vocals, instrumental_out_path)
+                    elif os.path.exists(os.path.join(demucs_song_output_dir, "other.wav")): # Fallback
+                         shutil.copy2(os.path.join(demucs_song_output_dir, "other.wav"), instrumental_out_path)
+                    else: print(f"Warning: Demucs instrumental stem not found for {filename}", flush=True)
+
+
+            elif parsed_args_for_main.separator_tool == "audio_separator":
+                # audio-separator typically outputs directly to specified files or a simple dir
+                # Model name is part of the -m argument, output dir can be specified.
+                # Let's make it output to a temp song-specific dir first.
+                audio_sep_song_temp_dir = os.path.join(parsed_args_for_main.audio_separator_stem_output_base_dir, song_name_no_ext)
+                os.makedirs(audio_sep_song_temp_dir, exist_ok=True)
+
+                sep_cmd = [
+                    "audio-separator", song_path,
+                    "--model_name", parsed_args_for_main.audio_separator_model_filename,
+                    "--output_dir", audio_sep_song_temp_dir,
+                    "--output_format", "WAV"
+                ]
+                if parsed_args_for_main.use_autocast_for_separator: sep_cmd.append("--use_cuda_amp")
+                
+                if run_command(sep_cmd, f"Audio-Separator for {filename}", suppress_output=True):
+                    # audio-separator output naming convention: {filename_without_ext}_(Vocals).wav, {filename_without_ext}_(Instrumental).wav
+                    # It uses the *original* input filename for these.
+                    sanitized_input_song_name_no_ext = os.path.splitext(sanitize_filename_for_command(filename))[0]
+
+                    expected_as_vocals = os.path.join(audio_sep_song_temp_dir, f"{sanitized_input_song_name_no_ext}_(Vocals).wav")
+                    expected_as_instrumental = os.path.join(audio_sep_song_temp_dir, f"{sanitized_input_song_name_no_ext}_(Instrumental).wav")
+                    
+                    if os.path.exists(expected_as_vocals):
+                        shutil.copy2(expected_as_vocals, acapella_out_path)
+                    else: print(f"Warning: Audio-Separator vocals stem not found for {filename} at {expected_as_vocals}", flush=True)
+                    
+                    if os.path.exists(expected_as_instrumental):
+                        shutil.copy2(expected_as_instrumental, instrumental_out_path)
+                    else: print(f"Warning: Audio-Separator instrumental stem not found for {filename} at {expected_as_instrumental}", flush=True)
     else:
         print("\nSkipping PHASE 1b: Source Separation", flush=True)
 
     if not parsed_args_for_main.skip_forced_alignment:
         print("\nPHASE 1c: Forced Alignment (whisper-timestamped)", flush=True)
-        # ... (alignment logic with flush=True on its prints) ...
+        os.makedirs(parsed_args_for_main.alignments_json_dir, exist_ok=True)
+        
         wt_check_cmd = ["whisper_timestamped", "--help"] 
         print(f"DEBUG: Checking whisper_timestamped availability with: {' '.join(wt_check_cmd)}", flush=True)
         if not run_command(wt_check_cmd, "whisper_timestamped check", suppress_output=False, capture_stderr_on_error=True):
             print("ERROR: whisper_timestamped command check failed. Halting.", flush=True)
             return 
-        # ... rest of alignment logic ...
+
+        acapella_files_for_alignment = [{"filename": f} for f in os.listdir(parsed_args_for_main.acapellas_dir) if f.lower().endswith(('.mp3', '.wav', '.flac', '.m4a'))]
+        print(f"Found {len(acapella_files_for_alignment)} acapellas in {parsed_args_for_main.acapellas_dir} for alignment.", flush=True)
+
+        align_worker_partial = partial(align_song_worker, 
+                                       base_acapellas_dir=parsed_args_for_main.acapellas_dir,
+                                       output_json_dir=parsed_args_for_main.alignments_json_dir,
+                                       whisper_model_arg=parsed_args_for_main.whisper_model,
+                                       whisper_language_arg=parsed_args_for_main.whisper_language,
+                                       force_rerun_arg=parsed_args_for_main.force_rerun_alignment)
+        
+        num_align_workers = min(parsed_args_for_main.num_workers_alignment, os.cpu_count() or 1)
+        num_align_workers = max(1, num_align_workers) # Ensure at least 1 worker
+
+        aligned_count = 0
+        failed_count = 0
+        skipped_count = 0
+
+        if num_align_workers > 1 and len(acapella_files_for_alignment) > 1 :
+            print(f"Starting parallel alignment with {num_align_workers} workers...", flush=True)
+            with multiprocessing.Pool(processes=num_align_workers) as pool:
+                for result in tqdm(pool.imap_unordered(align_worker_partial, acapella_files_for_alignment), total=len(acapella_files_for_alignment), desc="Aligning Acapellas"):
+                    if result["status"] == "aligned": aligned_count += 1
+                    elif result["status"] == "skipped_exists": skipped_count +=1
+                    else: failed_count += 1
+        else:
+            print("Starting serial alignment (1 worker or 1 file)...", flush=True)
+            for acapella_info in tqdm(acapella_files_for_alignment, desc="Aligning Acapellas Serially"):
+                result = align_worker_partial(acapella_info)
+                if result["status"] == "aligned": aligned_count += 1
+                elif result["status"] == "skipped_exists": skipped_count +=1
+                else: failed_count += 1
+        
+        print(f"Alignment finished. Aligned: {aligned_count}, Failed: {failed_count}, Skipped (exists): {skipped_count}", flush=True)
+
     else:
         print("\nSkipping PHASE 1c: Forced Alignment", flush=True)
 
@@ -258,46 +397,63 @@ def main(args_main_func):
 
 parsed_args_for_main = None 
 if __name__ == "__main__":
+    multiprocessing.freeze_support() # Important for Windows
     parser = argparse.ArgumentParser(description="Run the full BeefAI data preparation pipeline.")
-    # (Keep all argparse definitions as they were)
-    parser.add_argument("--skip_venv_warning_prompt", action="store_true", help="Skip venv warning prompt.")
-    parser.add_argument("--skip_setup_prompt", action="store_true", help="Skip setup prompt.")
-    parser.add_argument("--skip_data_acquisition", action="store_true", help="Skip data acquisition.")
-    parser.add_argument("--skip_source_separation", action="store_true", help="Skip source separation.")
-    parser.add_argument("--skip_forced_alignment", action="store_true", help="Skip forced alignment.")
-    parser.add_argument("--force_rerun_separation", action="store_true", help="Force rerun separation.")
-    parser.add_argument("--force_rerun_alignment", action="store_true", help="Force rerun alignment.")
-    parser.add_argument("--force_reprocess_features", action="store_true", help="Force reprocess features.")
-    parser.add_argument("--raw_songs_dir", default=DEFAULT_RAW_SONGS_DIR, help="Raw songs directory.")
-    parser.add_argument("--lyrics_dir", default=DEFAULT_LYRICS_DIR, help="Lyrics directory.")
-    parser.add_argument("--instrumentals_dir", default=DEFAULT_INSTRUMENTALS_DIR, help="Instrumentals output dir.")
-    parser.add_argument("--acapellas_dir", default=DEFAULT_ACAPELLAS_DIR, help="Acapellas output dir.")
-    parser.add_argument("--alignments_json_dir", default=DEFAULT_ALIGNMENTS_JSON_DIR, help="Alignment JSONs output dir.")
-    parser.add_argument("--preprocessed_output_dir", default=DEFAULT_PREPROCESSED_OUTPUT_DIR, help="Preprocessed data output dir.")
-    parser.add_argument("--separator_tool", choices=["demucs", "audio_separator"], default="audio_separator", help="Source separation tool.") 
-    parser.add_argument("--demucs_stem_output_base_dir", default=DEFAULT_DEMUCS_STEM_OUTPUT_BASE_DIR, help="Demucs stems base output dir.")
-    parser.add_argument("--demucs_model", default=DEFAULT_DEMUCS_MODEL, help="Demucs model.")
-    parser.add_argument("--audio_separator_stem_output_base_dir", default=DEFAULT_AUDIO_SEPARATOR_STEM_OUTPUT_BASE_DIR, help="Audio-separator stems base output dir.")
-    parser.add_argument("--audio_separator_model_filename", default=DEFAULT_AUDIO_SEPARATOR_MODEL, help="Audio-separator model ONNX name.")
-    parser.add_argument("--use_autocast_for_separator", action="store_true", help="Enable autocast for audio-separator.")
-    parser.add_argument("--whisper_model", default="small", help="Whisper model for alignment.")
-    parser.add_argument("--whisper_language", default="en", help="Language for Whisper alignment.")
-    default_cpu_half = max(1, (os.cpu_count() or 1) // 2)
-    parser.add_argument("--num_workers_alignment", type=int, default=max(1, (os.cpu_count() or 1) // 4), help="Num workers for alignment.")
-    parser.add_argument("--num_workers_feature_extraction", type=int, default=default_cpu_half, help="Num workers for feature extraction.")
+    
+    # Phase skipping flags
+    parser.add_argument("--skip_venv_warning_prompt", action="store_true", help="Skip venv warning prompt if not in expected .venv.")
+    parser.add_argument("--skip_setup_prompt", action="store_true", help="Skip the initial setup confirmation prompt.")
+    parser.add_argument("--skip_data_acquisition", action="store_true", help="Skip the conceptual data acquisition phase (Phase 1).")
+    parser.add_argument("--skip_source_separation", action="store_true", help="Skip source separation (Phase 1b).")
+    parser.add_argument("--skip_forced_alignment", action="store_true", help="Skip forced alignment (Phase 1c).")
 
+    # Force flags
+    parser.add_argument("--force_rerun_separation", action="store_true", help="Force rerun source separation even if outputs exist.")
+    parser.add_argument("--force_rerun_alignment", action="store_true", help="Force rerun forced alignment even if outputs exist.")
+    parser.add_argument("--force_reprocess_features", action="store_true", help="Force scripts/preprocess_dataset.py to ignore its caches.")
+
+    # Directory paths
+    parser.add_argument("--raw_songs_dir", default=DEFAULT_RAW_SONGS_DIR, help=f"Directory for raw song audio files. Default: {DEFAULT_RAW_SONGS_DIR}")
+    parser.add_argument("--lyrics_dir", default=DEFAULT_LYRICS_DIR, help=f"Directory for raw lyric text files. Default: {DEFAULT_LYRICS_DIR}")
+    parser.add_argument("--instrumentals_dir", default=DEFAULT_INSTRUMENTALS_DIR, help=f"Output directory for instrumental tracks. Default: {DEFAULT_INSTRUMENTALS_DIR}")
+    parser.add_argument("--acapellas_dir", default=DEFAULT_ACAPELLAS_DIR, help=f"Output directory for acapella tracks. Default: {DEFAULT_ACAPELLAS_DIR}")
+    parser.add_argument("--alignments_json_dir", default=DEFAULT_ALIGNMENTS_JSON_DIR, help=f"Output directory for alignment JSON files. Default: {DEFAULT_ALIGNMENTS_JSON_DIR}")
+    parser.add_argument("--preprocessed_output_dir", default=DEFAULT_PREPROCESSED_OUTPUT_DIR, help=f"Output directory for data processed by preprocess_dataset.py. Default: {DEFAULT_PREPROCESSED_OUTPUT_DIR}")
+
+    # Source separation tool configuration
+    parser.add_argument("--separator_tool", choices=["demucs", "audio_separator"], default="audio_separator", help=f"Source separation tool to use. Default: audio_separator")
+    parser.add_argument("--demucs_stem_output_base_dir", default=DEFAULT_DEMUCS_STEM_OUTPUT_BASE_DIR, help=f"Base output directory for Demucs stems. Default: {DEFAULT_DEMUCS_STEM_OUTPUT_BASE_DIR}")
+    parser.add_argument("--demucs_model", default=DEFAULT_DEMUCS_MODEL, help=f"Demucs model name (e.g., htdemucs_ft). Default: {DEFAULT_DEMUCS_MODEL}")
+    parser.add_argument("--audio_separator_stem_output_base_dir", default=DEFAULT_AUDIO_SEPARATOR_STEM_OUTPUT_BASE_DIR, help=f"Base output directory for audio-separator stems. Default: {DEFAULT_AUDIO_SEPARATOR_STEM_OUTPUT_BASE_DIR}")
+    parser.add_argument("--audio_separator_model_filename", default=DEFAULT_AUDIO_SEPARATOR_MODEL, help=f"Filename of the audio-separator ONNX model. Default: {DEFAULT_AUDIO_SEPARATOR_MODEL}")
+    parser.add_argument("--use_autocast_for_separator", action="store_true", help="Enable autocast (mixed precision) for audio-separator if using CUDA.")
+    
+    # Whisper-timestamped configuration
+    parser.add_argument("--whisper_model", default="small", help=f"Whisper model size for alignment (e.g., tiny, base, small, medium, large). Default: small")
+    parser.add_argument("--whisper_language", default="en", help="Language for Whisper alignment (e.g., en, es). Default: en")
+
+    # Concurrency
+    default_cpu_half = max(1, (os.cpu_count() or 1) // 2)
+    parser.add_argument("--num_workers_alignment", type=int, default=max(1, (os.cpu_count() or 1) // 4), help=f"Number of workers for parallel alignment. Default: quarter of CPU cores, min 1.")
+    parser.add_argument("--num_workers_feature_extraction", type=int, default=default_cpu_half, help=f"Number of workers for preprocess_dataset.py. Default: half of CPU cores, min 1.")
+    
     args = parser.parse_args()
     parsed_args_for_main = args 
 
-    # Ensure all top-level prints in this script also use flush=True
     print(f"DEBUG: run_full_data_pipeline.py - Parsed args: {args}", flush=True)
 
     if not args.skip_source_separation and not os.path.isdir(args.raw_songs_dir):
         print(f"ERROR: Raw songs dir '{args.raw_songs_dir}' not found, but source separation enabled.", flush=True)
         sys.exit(1)
     if not args.skip_forced_alignment and not os.path.isdir(args.acapellas_dir):
-        print(f"ERROR: Acapellas dir '{args.acapellas_dir}' not found, but forced alignment enabled.", flush=True)
-        sys.exit(1)
+        # Create acapellas_dir if it's missing but separation is supposed to run, as separation creates it.
+        # Only error if alignment is *enabled* and separation is *skipped* but dir is missing.
+        if args.skip_source_separation:
+            print(f"ERROR: Acapellas dir '{args.acapellas_dir}' not found, forced alignment is enabled, and source separation is skipped. Cannot proceed.", flush=True)
+            sys.exit(1)
+        else: # Separation is enabled, so it *should* create this dir. Make sure it exists for later steps.
+            os.makedirs(args.acapellas_dir, exist_ok=True)
+
     
     print("DEBUG: run_full_data_pipeline.py - Calling main function.", flush=True)
     main(args)

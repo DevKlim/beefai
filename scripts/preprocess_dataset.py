@@ -69,10 +69,6 @@ def process_song_worker(
     worker_id: Optional[int] = None 
 ) -> Optional[TrainingInstance]:
     
-    # Determine a unique log prefix for this worker invocation
-    # Using os.getpid() ensures uniqueness even if worker_id is not perfectly managed by Pool for imap_unordered
-    # However, passing an explicit worker_id if available (e.g. from enumerate) can be cleaner.
-    # For now, let's assume worker_id is not passed by default Pool usage.
     current_pid = os.getpid()
     log_prefix = f"[WorkerPID:{current_pid}]"
     song_id = song_info["song_id"] 
@@ -80,8 +76,6 @@ def process_song_worker(
     print(f"{log_prefix} [{song_id}] Worker processing started.", flush=True)
 
     try: 
-        # Initialize extractors within the worker process to avoid pickling issues
-        # and ensure any stdout/stderr from their init (like TextProcessor) is captured here.
         print(f"{log_prefix} [{song_id}] Initializing BeatFeatureExtractor...", flush=True)
         current_beat_extractor = BeatFeatureExtractor(sample_rate=beat_extractor_config["sample_rate"])
         print(f"{log_prefix} [{song_id}] BeatFeatureExtractor initialized.", flush=True)
@@ -107,7 +101,6 @@ def process_song_worker(
             print(f"{log_prefix} [{song_id}] Stems directory '{stems_dir_for_this_song}' not found, will use full mix for BFE.", flush=True)
             stems_dir_for_this_song = None 
 
-        # --- Beat Feature Extraction (Stage 2) ---
         print(f"{log_prefix} [{song_id}] Starting Beat Feature Extraction (Stage 2)...", flush=True)
         song_beat_features: Optional[SongBeatFeatures] = None
         if not force_reprocess_arg and os.path.exists(beat_features_cache_file):
@@ -119,10 +112,10 @@ def process_song_worker(
                 print(f"{log_prefix} [{song_id}] Beat Features: Warning - Failed to load from cache ({beat_features_cache_file}): {e_load_bf}. Reprocessing.", flush=True)
                 song_beat_features = None 
         
-        if song_beat_features is None: # This condition means either cache load failed, cache didn't exist, or force_reprocess is true
+        if song_beat_features is None: 
             if not os.path.exists(instrumental_audio_file_path):
                 print(f"{log_prefix} [{song_id}] Beat Features: ERROR - Instrumental audio not found at '{instrumental_audio_file_path}'. Cannot extract beat features.", flush=True)
-                return None # Critical failure for this song
+                return None 
             print(f"{log_prefix} [{song_id}] Extracting beat features from: {instrumental_audio_file_path}", flush=True)
             song_beat_features = current_beat_extractor.extract_features_for_song(
                 audio_path=instrumental_audio_file_path, 
@@ -140,14 +133,10 @@ def process_song_worker(
             return None
         print(f"{log_prefix} [{song_id}] Beat Feature Extraction (Stage 2) complete. Found {len(song_beat_features)} bars.", flush=True)
 
-
-        # --- Flow Data Extraction (Stage 3) ---
         print(f"{log_prefix} [{song_id}] Starting Flow Data Extraction (Stage 3)...", flush=True)
         song_flow_data: Optional[FlowData] = None
         if not alignment_file_path or not os.path.exists(alignment_file_path):
             print(f"{log_prefix} [{song_id}] Flow Data: Warning - Alignment file not found at '{alignment_file_path}'. Cannot extract flow data.", flush=True)
-            # If flow data is essential, return None. If optional for some songs, proceed.
-            # For now, assuming flow data is essential for a training instance.
             return None 
                 
         if not force_reprocess_arg and os.path.exists(flow_data_cache_file):
@@ -159,11 +148,11 @@ def process_song_worker(
                 print(f"{log_prefix} [{song_id}] Flow Data: Warning - Failed to load from cache ({flow_data_cache_file}): {e_load_fd}. Reprocessing.", flush=True)
                 song_flow_data = None 
                     
-        if song_flow_data is None: # This condition means either cache load failed, cache didn't exist, or force_reprocess is true
+        if song_flow_data is None: 
             print(f"{log_prefix} [{song_id}] Extracting flow data using alignment: {alignment_file_path}", flush=True)
             song_flow_data = current_flow_extractor.extract_flow_for_song(
                 alignment_data_path=alignment_file_path, 
-                song_beat_features=song_beat_features # Pass the obtained beat features
+                song_beat_features=song_beat_features
             )
             if song_flow_data: 
                 print(f"{log_prefix} [{song_id}] Flow data extracted. Saving to cache: {flow_data_cache_file}", flush=True)
@@ -171,7 +160,6 @@ def process_song_worker(
                 except Exception as e_save_fd: print(f"{log_prefix} [{song_id}] Flow Data: Warning - Failed to save cache: {e_save_fd}", flush=True)
             else:
                  print(f"{log_prefix} [{song_id}] Flow data extraction returned no data.", flush=True)
-
 
         if not song_flow_data:
             print(f"{log_prefix} [{song_id}] Flow Data: ERROR - No flow data obtained after attempt. Skipping song.", flush=True)
@@ -187,7 +175,6 @@ def process_song_worker(
         return training_instance
 
     except Exception as e_worker:
-        # This broad except is crucial for catching unexpected errors within the worker.
         print(f"!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!", flush=True)
         print(f"{log_prefix} [{song_id}] CRITICAL ERROR in worker process: {e_worker}", flush=True)
         print(f"{log_prefix} [{song_id}] Traceback:\n{traceback.format_exc()}", flush=True)
@@ -214,16 +201,13 @@ def main(args):
             return
         actual_stems_path_for_bfe = os.path.join(args.pre_separated_stems_root_dir, args.stem_provider_model_name)
     elif args.separator_tool_used_for_stems == "audio_separator":
-        # For audio_separator, the model name might not be part of the directory structure in stems_cache
-        # if stems_cache directly contains song_id subfolders.
-        # If stem_provider_model_name is given, assume it's a subfolder. Otherwise, use root.
         if args.stem_provider_model_name:
             actual_stems_path_for_bfe = os.path.join(args.pre_separated_stems_root_dir, args.stem_provider_model_name)
-        else: # If no model name, assume stems_cache/<song_id>/ structure.
+        else: 
              actual_stems_path_for_bfe = args.pre_separated_stems_root_dir
-    else: # "none" or other
+    else: 
         print(f"Info: --separator_tool_used_for_stems is '{args.separator_tool_used_for_stems}'. Stems will not be actively searched for by BFE.", flush=True)
-        actual_stems_path_for_bfe = "" # Indicates no specific base path for stems
+        actual_stems_path_for_bfe = "" 
         
     if actual_stems_path_for_bfe and not os.path.isdir(actual_stems_path_for_bfe): 
         print(f"Warning: Constructed base stems path for BFE ('{actual_stems_path_for_bfe}') not found. BFE will likely fallback to full mix for all songs.", flush=True)
@@ -236,13 +220,11 @@ def main(args):
         if filename.lower().endswith(audio_extensions):
             song_id = os.path.splitext(filename)[0]
             instrumental_audio_file_path = os.path.join(args.instrumentals_dir, filename)
-            # Alignment JSON filename might be slightly different (e.g. .wav.words.json)
-            # Let's check for common patterns.
             possible_alignment_filenames = [
-                f"{song_id}.json", # Exact match
-                f"{filename}.json", # Full filename match (e.g. song.wav.json)
-                f"{song_id}.words.json", # Common pattern
-                f"{filename}.words.json" # Full filename with .words
+                f"{song_id}.json", 
+                f"{filename}.json", 
+                f"{song_id}.words.json", 
+                f"{filename}.words.json" 
             ]
             alignment_file_path = ""
             for p_align_fn in possible_alignment_filenames:
@@ -252,7 +234,7 @@ def main(args):
                     break
             
             stems_dir_for_song_for_bfe = ""
-            if actual_stems_path_for_bfe: # Only try to form this path if a base path for stems exists
+            if actual_stems_path_for_bfe: 
                  stems_dir_for_song_for_bfe = get_song_specific_stems_dir(
                     actual_stems_path_for_bfe, song_id
                 )
@@ -260,7 +242,7 @@ def main(args):
             song_files_to_process_info.append({
                 "song_id": song_id, 
                 "instrumental_audio_path": instrumental_audio_file_path,
-                "alignment_path": alignment_file_path, # Will be empty if not found
+                "alignment_path": alignment_file_path, 
                 "stems_dir_for_song": stems_dir_for_song_for_bfe 
             })
     
@@ -273,16 +255,14 @@ def main(args):
     
     print("DEBUG: preprocess_dataset.py - Getting BeatFeatureExtractor config (subdivisions_per_bar)...", flush=True)
     try:
-        # Temporarily init BFE just to get its default subdivisions_per_bar if not passed
-        # This is okay as TextProcessor's init logic should be robust now.
         temp_bfe_for_config = BeatFeatureExtractor(sample_rate=args.sample_rate)
         subdivisions_per_bar_for_config = temp_bfe_for_config.subdivisions_per_bar
-        del temp_bfe_for_config # Free it up
+        del temp_bfe_for_config 
         print(f"DEBUG: preprocess_dataset.py - Using subdivisions_per_bar: {subdivisions_per_bar_for_config}", flush=True)
     except Exception as e_bfe_init_main:
         print(f"ERROR: Failed to initialize BeatFeatureExtractor in main to get config: {e_bfe_init_main}", flush=True)
         print(f"Traceback: {traceback.format_exc()}", flush=True)
-        return # Cannot proceed if this basic config step fails
+        return 
 
     beat_extractor_worker_config = {"sample_rate": args.sample_rate}
     flow_extractor_worker_config = {
@@ -301,7 +281,7 @@ def main(args):
                 flow_extractor_config=flow_extractor_worker_config,
                 cache_base_dir_arg=args.processed_output_dir,
                 force_reprocess_arg=args.force_reprocess,
-                worker_id=0 # Explicit worker ID for serial debug run
+                worker_id=0 
             )
             if result:
                  all_processed_song_data_results.append(result)
@@ -312,11 +292,9 @@ def main(args):
             print(f"[Main-Debug] Debug song ID '{args.debug_single_song_id}' not found in the list of processable songs.", flush=True)
     else:
         num_workers = min(args.num_workers, os.cpu_count() if os.cpu_count() else 1)
-        num_workers = max(1, num_workers) # Ensure at least 1 worker
+        num_workers = max(1, num_workers) 
         print(f"DEBUG: preprocess_dataset.py - Starting parallel processing with {num_workers} worker(s).", flush=True)
         
-        # Create the partial function for the worker
-        # Pass worker_id as None, process_song_worker will use os.getpid()
         process_song_worker_partial = partial(process_song_worker,
                                               beat_extractor_config=beat_extractor_worker_config,
                                               flow_extractor_config=flow_extractor_worker_config,
@@ -326,15 +304,11 @@ def main(args):
         
         print(f"DEBUG: preprocess_dataset.py - Dispatching {len(song_files_to_process_info)} songs to worker pool...", flush=True)
         try:
-            # Using try-finally to ensure pool is closed/joined
             pool = multiprocessing.Pool(processes=num_workers)
             try:
-                # imap_unordered can be more memory efficient for large iterables
-                # and allows results to be processed as they complete.
                 results_iterator = pool.imap_unordered(process_song_worker_partial, song_files_to_process_info)
-                
                 for result in tqdm(results_iterator, total=len(song_files_to_process_info), desc="Preprocessing (Beat Feat & Flow Data)"):
-                    if result: # result is Optional[TrainingInstance]
+                    if result: 
                         all_processed_song_data_results.append(result)
                 print("DEBUG: preprocess_dataset.py - All tasks from pool.imap_unordered have been processed.", flush=True)
             finally:
@@ -345,7 +319,6 @@ def main(args):
         except Exception as e_pool:
             print(f"ERROR: An error occurred during multiprocessing pool execution: {e_pool}", flush=True)
             print(f"Traceback: {traceback.format_exc()}", flush=True)
-            # Depending on the error, some results might be in all_processed_song_data_results
     
     final_training_instances: List[TrainingInstance] = [item for item in all_processed_song_data_results if item is not None]
     
@@ -372,8 +345,6 @@ def main(args):
 
 
 if __name__ == "__main__":
-    # This is crucial for Windows multiprocessing with spawn start method.
-    # It prevents infinite recursion of imports and main execution in child processes.
     multiprocessing.freeze_support() 
 
     print("DEBUG: preprocess_dataset.py - Script invoked as __main__", flush=True)
@@ -386,22 +357,21 @@ if __name__ == "__main__":
                         help=f"Directory to save processed features, caches, and the output '{DEFAULT_OUTPUT_PROCESSED_FILENAME}'. Default: {DEFAULT_PROCESSED_OUTPUT_DIR}")
     
     parser.add_argument("--pre_separated_stems_root_dir", type=str, 
-                        default=DEFAULT_PRE_SEPARATED_STEMS_ROOT_DIR_DEMUCS, # Defaulting to demucs path, but tool choice is key
-                        help="Root directory where BeatFeatureExtractor should look for detailed song stems (e.g., data/stems_cache or data/stems_cache_audio_sep). Default: %(default)s")
+                        default=DEFAULT_PRE_SEPARATED_STEMS_ROOT_DIR_DEMUCS,
+                        help="Root directory where BeatFeatureExtractor should look for detailed song stems. Default: %(default)s")
     parser.add_argument("--separator_tool_used_for_stems", type=str, choices=["demucs", "audio_separator", "none"], 
-                        default=DEFAULT_SEPARATOR_TOOL_USED, # 'demucs'
-                        help="Tool that provided detailed stems BeatFeatureExtractor might use. 'none' means BFE uses full instrumentals. Default: %(default)s")
+                        default=DEFAULT_SEPARATOR_TOOL_USED,
+                        help="Tool that provided detailed stems. 'none' means BFE uses full instrumentals. Default: %(default)s")
     parser.add_argument("--stem_provider_model_name", type=str, 
-                        default=DEFAULT_DEMUCS_MODEL_NAME, # 'htdemucs_ft'
-                        help="Model name used by the --separator_tool_used_for_stems. Forms part of the path (e.g., demucs_model_name under stems_root_dir). Default: %(default)s")
+                        default=DEFAULT_DEMUCS_MODEL_NAME,
+                        help="Model name used by the --separator_tool_used_for_stems. Forms part of the path. Default: %(default)s")
 
     parser.add_argument("--sample_rate", type=int, default=44100, help="Target sample rate for audio processing. Default: %(default)s")
     parser.add_argument("--force_reprocess", action="store_true", help="Force reprocessing of features, ignore all caches.")
-    # Adjust default for num_workers based on common issues. Start with a smaller default.
     parser.add_argument("--num_workers", type=int, default=max(1, (os.cpu_count() or 4) // 2), 
                         help="Number of worker processes for parallel song processing. Default: half of CPU cores, min 1.")
     parser.add_argument("--debug_single_song_id", type=str, default=None, 
-                        help="If set, process only this song ID (filename without extension, e.g., 'A.D.H.D') serially for debugging and then exit early.")
+                        help="If set, process only this song ID serially for debugging and then exit early.")
     
     args = parser.parse_args()
     print(f"DEBUG: preprocess_dataset.py - Parsed arguments: {args}", flush=True)

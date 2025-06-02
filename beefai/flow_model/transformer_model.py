@@ -1,3 +1,4 @@
+# beefai/flow_model/transformer_model.py
 import torch
 import torch.nn as nn
 from torch.nn import functional as F
@@ -187,11 +188,11 @@ class FlowTransformerDecoder(nn.Module):
                  segment_ids_prompt: torch.Tensor, 
                  intra_line_pos_ids_prompt: torch.Tensor, 
                  max_new_tokens: int, 
-                 tokenizer: 'FlowTokenizer', 
+                 tokenizer: 'FlowTokenizer', # Make sure this type hint is present
                  temperature: float = 1.0, 
                  top_k: Optional[int] = None
                 ) -> torch.Tensor:
-        self.eval() # Ensure model is in eval mode
+        self.eval() 
         
         if idx_prompt.size(0) != 1:
             raise NotImplementedError("Generation currently supports batch size 1 for simplicity of context ID management.")
@@ -201,34 +202,35 @@ class FlowTransformerDecoder(nn.Module):
         current_intra_pos_ids = intra_line_pos_ids_prompt.clone()
 
         for _ in range(max_new_tokens):
-            # Crop context if it exceeds block_size
             idx_cond = current_token_ids if current_token_ids.size(1) <= self.config.block_size else current_token_ids[:, -self.config.block_size:]
             seg_ids_cond = current_segment_ids if current_segment_ids.size(1) <= self.config.block_size else current_segment_ids[:, -self.config.block_size:]
             intra_pos_ids_cond = current_intra_pos_ids if current_intra_pos_ids.size(1) <= self.config.block_size else current_intra_pos_ids[:, -self.config.block_size:]
 
             logits, _ = self(idx_cond, segment_ids=seg_ids_cond, intra_line_pos_ids=intra_pos_ids_cond)
-            logits = logits[:, -1, :] / temperature # Get logits for the last token, apply temperature
+            logits = logits[:, -1, :] / temperature 
             
-            if top_k is not None and top_k > 0: # Added top_k > 0 check
+            # --- BEGIN MODIFICATION: Suppress UNK token ---
+            if tokenizer.unk_token_id is not None:
+                logits[:, tokenizer.unk_token_id] = -float('Inf')
+            # --- END MODIFICATION ---
+            
+            if top_k is not None and top_k > 0: 
                 v, _ = torch.topk(logits, min(top_k, logits.size(-1)))
                 logits[logits < v[:, [-1]]] = -float('Inf') 
             
             probs = F.softmax(logits, dim=-1)
             idx_next = torch.multinomial(probs, num_samples=1) 
             
-            # Determine context IDs for the newly generated token
-            # Pass the *current* sequence of tokens (before adding idx_next) to get context for idx_next
             history_token_list_for_ctx = current_token_ids[0].tolist() 
             
             next_seg_id_val, next_intra_pos_id_val = get_next_context_ids_for_token(
-                history_token_list_for_ctx, # Sequence leading up to the new token
-                idx_next.item(),            # The new token itself
+                history_token_list_for_ctx, 
+                idx_next.item(),            
                 tokenizer, 
                 self.config.max_segment_types, 
                 self.config.max_intra_line_positions
             )
             
-            # Append new token and its context IDs
             current_token_ids = torch.cat((current_token_ids, idx_next), dim=1)
             current_segment_ids = torch.cat((current_segment_ids, torch.tensor([[next_seg_id_val]], dtype=torch.long, device=idx_prompt.device)), dim=1)
             current_intra_pos_ids = torch.cat((current_intra_pos_ids, torch.tensor([[next_intra_pos_id_val]], dtype=torch.long, device=idx_prompt.device)), dim=1)
@@ -236,7 +238,6 @@ class FlowTransformerDecoder(nn.Module):
             if idx_next.item() == tokenizer.eos_token_id:
                 break
         
-        # self.train() # Not strictly necessary if only used for inference after loading, but good practice if it might be trained later
         return current_token_ids
 
 
@@ -492,44 +493,4 @@ if __name__ == '__main__':
     for _ in range(3):
         dummy_beat_event_tok = tokenizer.token_to_id['[KICK_AT_0]'] # Example
         dbe_s, dbe_i = get_next_context_ids_for_token(prompt_tokens, dummy_beat_event_tok, tokenizer, gpt_config_instance.max_segment_types, gpt_config_instance.max_intra_line_positions)
-        prompt_tokens.append(dummy_beat_event_tok); prompt_segments.append(dbe_s); prompt_intra_pos.append(dbe_i)
-
-    # 3. SEP for Bar 0 Flow
-    sep0_tok = tokenizer.sep_input_flow_token_id
-    s0_s, s0_i = get_next_context_ids_for_token(prompt_tokens, sep0_tok, tokenizer, gpt_config_instance.max_segment_types, gpt_config_instance.max_intra_line_positions)
-    prompt_tokens.append(sep0_tok); prompt_segments.append(s0_s); prompt_intra_pos.append(s0_i)
-
-    # 4. LINE_START for Bar 0, Line 0 (Priming token)
-    line0_tok = tokenizer.line_start_token_id
-    l0_s, l0_i = get_next_context_ids_for_token(prompt_tokens, line0_tok, tokenizer, gpt_config_instance.max_segment_types, gpt_config_instance.max_intra_line_positions)
-    prompt_tokens.append(line0_tok); prompt_segments.append(l0_s); prompt_intra_pos.append(l0_i)
-
-
-    idx_prompt = torch.tensor([prompt_tokens], dtype=torch.long)
-    seg_ids_prompt = torch.tensor([prompt_segments], dtype=torch.long)
-    intra_pos_ids_prompt = torch.tensor([prompt_intra_pos], dtype=torch.long)
-
-    print(f"\nConstructed Prompt for Generation (len {idx_prompt.size(1)}):")
-    print("  Token            | Seg | IntraPos")
-    print("  -----------------|-----|---------")
-    for i in range(idx_prompt.size(1)):
-        tok_str = tokenizer.id_to_token.get(idx_prompt[0,i].item(), "[UNK]")
-        seg_val = seg_ids_prompt[0,i].item()
-        pos_val = intra_pos_ids_prompt[0,i].item()
-        print(f"  {tok_str:<16} | {seg_val:<3} | {pos_val:<7}")
-
-    print("\nSimulating model.generate()...")
-    # Generate a few tokens to see their context IDs
-    generated_ids_full = model.generate(
-        idx_prompt, 
-        seg_ids_prompt,
-        intra_pos_ids_prompt,
-        max_new_tokens=15, 
-        tokenizer=tokenizer,
-        temperature=0.8,
-        top_k=20 # Use a reasonable top_k for diverse but not too random output
-    )
-    print("\nFull sequence from model.generate() (Prompt + Generated):")
-    
-    generated_sequence_list = generated_ids_full[0].tolist()
-    print_tokens_with_inferred_context(generated_sequence_list, tokenizer, gpt_config_instance)
+        prompt_tokens.append(dummy_beat_event_tok); prompt_segments.append(dbe_s); prompt_intra_pos

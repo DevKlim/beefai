@@ -1,3 +1,4 @@
+# beefai/data_processing/beat_feature_extractor.py
 import librosa
 import numpy as np
 import os
@@ -15,16 +16,19 @@ class BeatFeatureExtractor:
     def __init__(self, sample_rate: int = 44100, subdivisions_per_bar: int = 16):
         self.sample_rate = sample_rate
         self.subdivisions_per_bar = subdivisions_per_bar
-        # This initial print is fine, worker-specific logs will follow.
         # print("BeatFeatureExtractor initialized. NOTE: Drum/Bass transcription is currently a STUB.")
         # print("It will simulate features using librosa.onset.onset_detect on relevant stems or full mix.")
 
-    def _load_stem(self, stems_dir: str, stem_filename: str) -> Optional[np.ndarray]:
-        """Loads a specific stem if it exists."""
+    def _load_stem(self, stems_dir: str, stem_filename: str, 
+                   offset_sec: Optional[float] = None, 
+                   duration_sec: Optional[float] = None) -> Optional[np.ndarray]: # Added offset/duration
+        """Loads a specific stem if it exists, with offset and duration."""
         stem_path = os.path.join(stems_dir, stem_filename)
         if os.path.exists(stem_path):
             try:
-                y, sr = librosa.load(stem_path, sr=self.sample_rate, mono=True)
+                y, sr = librosa.load(stem_path, sr=self.sample_rate, mono=True,
+                                     offset=offset_sec if offset_sec is not None else 0.0,
+                                     duration=duration_sec)
                 # print(f"{LOG_PREFIX_BFE}   Successfully loaded stem: {stem_filename} from {stems_dir}", flush=True)
                 return y
             except Exception as e:
@@ -44,6 +48,10 @@ class BeatFeatureExtractor:
         hop_length = 512 
         backtrack = True 
         
+        if y_target is None or y_target.size == 0: # Add check for empty target array
+            # print(f"{LOG_PREFIX_BFE} Warning: Empty audio target for {instrument_name} onsets. Returning no onsets.")
+            return np.array([])
+
         if instrument_name == "kick":
             onsets = librosa.onset.onset_detect(y=y_target, sr=self.sample_rate, units='time', 
                                                 hop_length=hop_length, backtrack=backtrack,
@@ -84,196 +92,188 @@ class BeatFeatureExtractor:
 
         for onset_sec in onset_times_sec:
             time_within_bar_sec = onset_sec - bar_start_time_sec
-            if -1e-6 <= time_within_bar_sec < bar_duration_sec + 1e-6 :
-                subdivision_index = int(round(time_within_bar_sec / subdivision_duration_sec))
+            if -1e-6 <= time_within_bar_sec < bar_duration_sec + 1e-6 : # Loosen tolerance slightly
+                subdivision_index_float = time_within_bar_sec / subdivision_duration_sec
+                # Round carefully, ensuring it stays within [0, subdivisions_per_bar - 1]
+                subdivision_index = int(round(subdivision_index_float))
                 subdivision_index = max(0, min(subdivision_index, self.subdivisions_per_bar - 1))
                 quantized_indices.add(subdivision_index)
         return sorted(list(quantized_indices))
 
-    def extract_features_for_song(self, audio_path: str, stems_input_dir: Optional[str] = None) -> SongBeatFeatures:
+    def extract_features_for_song(self, audio_path: str, 
+                                  stems_input_dir: Optional[str] = None,
+                                  audio_offset_sec: Optional[float] = None, # New argument
+                                  audio_duration_sec: Optional[float] = None # New argument
+                                 ) -> SongBeatFeatures:
         """
-        Extracts beat features for an entire song, bar by bar.
+        Extracts beat features for an entire song (or a segment of it).
         Args:
             audio_path: Path to the full instrumental audio file.
-            stems_input_dir: Path to a directory containing pre-separated stems (bass.wav, drums.wav).
+            stems_input_dir: Path to a directory containing pre-separated stems.
+            audio_offset_sec: Start loading audio from this time (in seconds).
+            audio_duration_sec: Load only this duration of audio (in seconds).
         """
         song_basename = os.path.basename(audio_path)
-        print(f"{LOG_PREFIX_BFE} [{song_basename}] Starting feature extraction for: {audio_path}", flush=True)
+        offset_str = f", offset={audio_offset_sec}s" if audio_offset_sec is not None else ""
+        duration_str = f", duration={audio_duration_sec}s" if audio_duration_sec is not None else ""
+        print(f"{LOG_PREFIX_BFE} [{song_basename}] Starting feature extraction for: {audio_path}{offset_str}{duration_str}", flush=True)
 
         try:
-            y_full_mix, sr = librosa.load(audio_path, sr=self.sample_rate)
+            y_full_mix, sr = librosa.load(audio_path, sr=self.sample_rate, 
+                                          offset=audio_offset_sec if audio_offset_sec is not None else 0.0,
+                                          duration=audio_duration_sec)
+            if y_full_mix.size == 0:
+                print(f"{LOG_PREFIX_BFE} [{song_basename}] Loaded audio is empty (possibly due to offset/duration). Cannot extract features.", flush=True)
+                return []
             y_mono = librosa.to_mono(y_full_mix) if y_full_mix.ndim > 1 else y_full_mix
             print(f"{LOG_PREFIX_BFE} [{song_basename}] Audio loaded successfully.", flush=True)
         except Exception as e:
             print(f"{LOG_PREFIX_BFE} [{song_basename}] Error loading audio {audio_path}: {e}", flush=True)
             return []
 
-        # tempo_raw is what librosa.beat.beat_track returns. It might be a float or an array.
         tempo_raw, beat_frames = librosa.beat.beat_track(y=y_mono, sr=self.sample_rate, units='frames', hop_length=512)
         
-        # Process tempo_raw to get a single float value for 'tempo'
         tempo: float
         if isinstance(tempo_raw, np.ndarray):
             if tempo_raw.size > 0:
-                tempo = float(tempo_raw[0]) # Take the first estimated tempo if multiple
-                print(f"{LOG_PREFIX_BFE} [{song_basename}] Multiple tempos detected by librosa, using first: {tempo:.2f} BPM.", flush=True)
-            else:
-                tempo = 120.0 # Default if empty array
-                print(f"{LOG_PREFIX_BFE} [{song_basename}] Librosa returned empty array for tempo, defaulting to {tempo:.2f} BPM.", flush=True)
-        elif isinstance(tempo_raw, (float, int)):
-            tempo = float(tempo_raw)
-        else: # Should not happen, but robust fallback
-            tempo = 120.0
-            print(f"{LOG_PREFIX_BFE} [{song_basename}] Unknown type for tempo from librosa ({type(tempo_raw)}), defaulting to {tempo:.2f} BPM.", flush=True)
+                tempo = float(tempo_raw[0]) 
+            else: tempo = 120.0 
+        elif isinstance(tempo_raw, (float, int)): tempo = float(tempo_raw)
+        else: tempo = 120.0
+        if tempo <= 0: tempo = 120.0
 
-        if tempo <= 0: # If tempo is 0 or negative (e.g. from a bad estimate or default)
-            print(f"{LOG_PREFIX_BFE} [{song_basename}] Warning: Tempo estimated as {tempo:.2f} BPM, which is invalid. Using fallback 120 BPM.", flush=True)
-            tempo = 120.0
-
-
+        # beat_times_sec are relative to the start of the loaded segment (y_mono)
         beat_times_sec = librosa.frames_to_time(beat_frames, sr=self.sample_rate, hop_length=512)
-        # This print statement is now safe because 'tempo' is guaranteed to be a float.
-        print(f"{LOG_PREFIX_BFE} [{song_basename}] Effective Tempo: {tempo:.2f} BPM, Beats detected: {len(beat_times_sec)}", flush=True)
+        print(f"{LOG_PREFIX_BFE} [{song_basename}] Effective Tempo: {tempo:.2f} BPM, Beats detected in segment: {len(beat_times_sec)}", flush=True)
         
         if beat_times_sec.size == 0:
-            print(f"{LOG_PREFIX_BFE} [{song_basename}] Warning: No beats detected. Cannot extract bar features.", flush=True)
+            print(f"{LOG_PREFIX_BFE} [{song_basename}] Warning: No beats detected in segment. Cannot extract bar features.", flush=True)
             return []
 
         beats_per_bar = 4 
-        downbeat_indices = np.arange(0, len(beat_frames), beats_per_bar)
-        downbeat_times_sec = beat_times_sec[downbeat_indices[downbeat_indices < len(beat_times_sec)]]
+        # Downbeat indices are relative to the beats found *within the segment*
+        downbeat_indices_in_segment = np.arange(0, len(beat_frames), beats_per_bar)
+        # Ensure indices are valid for beat_times_sec derived from the segment
+        valid_downbeat_indices = downbeat_indices_in_segment[downbeat_indices_in_segment < len(beat_times_sec)]
+        downbeat_times_sec_in_segment = beat_times_sec[valid_downbeat_indices]
 
-        if downbeat_times_sec.size == 0: 
+
+        if downbeat_times_sec_in_segment.size == 0: 
             if beat_times_sec.size > 0:
-                print(f"{LOG_PREFIX_BFE} [{song_basename}] Warning: No downbeats explicitly found, using first beat as start of first bar.", flush=True)
-                downbeat_times_sec = np.array([beat_times_sec[0]])
-            else:
-                print(f"{LOG_PREFIX_BFE} [{song_basename}] Critical Warning: No beats or downbeats. Returning empty features.", flush=True)
+                # print(f"{LOG_PREFIX_BFE} [{song_basename}] Warning: No downbeats explicitly found in segment, using first beat as start of first bar.", flush=True)
+                downbeat_times_sec_in_segment = np.array([beat_times_sec[0]])
+            else: # Should be caught by earlier check, but for safety
+                print(f"{LOG_PREFIX_BFE} [{song_basename}] Critical Warning: No beats or downbeats in segment. Returning empty features.", flush=True)
                 return []
-        print(f"{LOG_PREFIX_BFE} [{song_basename}] Downbeats estimated: {len(downbeat_times_sec)}", flush=True)
+        # print(f"{LOG_PREFIX_BFE} [{song_basename}] Downbeats estimated in segment: {len(downbeat_times_sec_in_segment)}", flush=True)
 
         y_drums_stem: Optional[np.ndarray] = None
         y_bass_stem: Optional[np.ndarray] = None
         if stems_input_dir and os.path.isdir(stems_input_dir):
-            print(f"{LOG_PREFIX_BFE} [{song_basename}] Attempting to load stems from: {stems_input_dir}", flush=True)
-            y_drums_stem = self._load_stem(stems_input_dir, "drums.wav")
-            y_bass_stem = self._load_stem(stems_input_dir, "bass.wav")
-            if y_drums_stem is not None: print(f"{LOG_PREFIX_BFE} [{song_basename}] Drums stem loaded.", flush=True)
-            else: print(f"{LOG_PREFIX_BFE} [{song_basename}] Drum stem not found/loaded from {stems_input_dir}. Drum onsets will use full mix.", flush=True)
-            if y_bass_stem is not None: print(f"{LOG_PREFIX_BFE} [{song_basename}] Bass stem loaded.", flush=True)
-            else: print(f"{LOG_PREFIX_BFE} [{song_basename}] Bass stem not found/loaded from {stems_input_dir}. Bass onsets will use full mix.", flush=True)
-        else:
-            print(f"{LOG_PREFIX_BFE} [{song_basename}] No valid stems_input_dir provided ({stems_input_dir}). Onset detection will use full mix.", flush=True)
+            # print(f"{LOG_PREFIX_BFE} [{song_basename}] Attempting to load stems from: {stems_input_dir}", flush=True)
+            # When loading stems, also apply the same offset and duration if they are for the full track
+            y_drums_stem = self._load_stem(stems_input_dir, "drums.wav", audio_offset_sec, audio_duration_sec)
+            y_bass_stem = self._load_stem(stems_input_dir, "bass.wav", audio_offset_sec, audio_duration_sec)
+        # else:
+            # print(f"{LOG_PREFIX_BFE} [{song_basename}] No valid stems_input_dir provided. Onset detection will use full mix segment.", flush=True)
 
         song_features: SongBeatFeatures = []
-        num_bars = len(downbeat_times_sec)
-        print(f"{LOG_PREFIX_BFE} [{song_basename}] Processing {num_bars} bars...", flush=True)
+        num_bars_in_segment = len(downbeat_times_sec_in_segment)
+        # print(f"{LOG_PREFIX_BFE} [{song_basename}] Processing {num_bars_in_segment} bars from segment...", flush=True)
 
-        for i in range(num_bars):
-            bar_start_time = downbeat_times_sec[i]
-            if (i + 1) < num_bars:
-                bar_end_time = downbeat_times_sec[i+1]
+        for i in range(num_bars_in_segment):
+            bar_start_time_in_segment = downbeat_times_sec_in_segment[i]
+            if (i + 1) < num_bars_in_segment:
+                bar_end_time_in_segment = downbeat_times_sec_in_segment[i+1]
             else: 
-                beats_in_last_bar_mask = (beat_times_sec >= bar_start_time)
-                if np.any(beats_in_last_bar_mask):
-                    # last_beat_in_bar = beat_times_sec[beats_in_last_bar_mask][-1] # Not used
-                    avg_beat_duration_song = (beat_times_sec[-1] - beat_times_sec[0]) / (len(beat_times_sec) -1) if len(beat_times_sec) > 1 else (60.0/tempo if tempo > 0 else 0.5)
-                    bar_end_time = bar_start_time + beats_per_bar * avg_beat_duration_song
-                else: 
-                    bar_end_time = bar_start_time + (beats_per_bar * (60.0 / tempo) if tempo > 0 else 2.0) # Use the processed 'tempo'
-            bar_duration = bar_end_time - bar_start_time
+                # Estimate end of last bar in segment
+                avg_beat_duration_segment = (beat_times_sec[-1] - beat_times_sec[0]) / (len(beat_times_sec) -1) if len(beat_times_sec) > 1 else (60.0/tempo if tempo > 0 else 0.5)
+                bar_end_time_in_segment = bar_start_time_in_segment + beats_per_bar * avg_beat_duration_segment
+                # Ensure it doesn't exceed the duration of y_mono (the loaded segment)
+                segment_duration_samples = len(y_mono)
+                segment_duration_seconds = segment_duration_samples / self.sample_rate
+                bar_end_time_in_segment = min(bar_end_time_in_segment, segment_duration_seconds)
+
+
+            bar_duration = bar_end_time_in_segment - bar_start_time_in_segment
 
             if bar_duration <= 1e-6: 
-                # print(f"{LOG_PREFIX_BFE} [{song_basename}] Skipping bar {i} due to zero or negative duration ({bar_duration:.3f}s).", flush=True)
                 continue
             
+            # Onset detection should use times relative to the start of y_mono (the segment)
             kick_onsets_sec = self._get_onsets_for_instrument(y_drums_stem, y_mono, "kick")
             snare_onsets_sec = self._get_onsets_for_instrument(y_drums_stem, y_mono, "snare")
             hihat_onsets_sec = self._get_onsets_for_instrument(y_drums_stem, y_mono, "hihat")
             bass_onsets_sec = self._get_onsets_for_instrument(y_bass_stem, y_mono, "bass")
             
+            # The bar_index should be continuous, even if processing a segment.
+            # If audio_offset_sec is provided, we need to estimate what original bar index this corresponds to.
+            # For now, let's keep bar_index 0-indexed for the segment. The calling function
+            # (`visualize_flow_rhythm`) will handle the global bar context for generated flow.
+            current_bar_index_for_output = i 
+
             bar_feat: BarBeatFeatures = {
-                "bar_index": i,
-                "bpm": float(tempo), # Use the processed 'tempo'
+                "bar_index": current_bar_index_for_output, # 0-indexed within the segment
+                "bpm": float(tempo), 
                 "time_signature": (beats_per_bar, 4),
-                "kick_events": self._quantize_onsets_to_bar_subdivisions(kick_onsets_sec, bar_start_time, bar_duration),
-                "snare_events": self._quantize_onsets_to_bar_subdivisions(snare_onsets_sec, bar_start_time, bar_duration),
-                "hihat_events": self._quantize_onsets_to_bar_subdivisions(hihat_onsets_sec, bar_start_time, bar_duration),
-                "bass_events": self._quantize_onsets_to_bar_subdivisions(bass_onsets_sec, bar_start_time, bar_duration),
-                "bar_start_time_sec": round(bar_start_time, 3), 
+                "kick_events": self._quantize_onsets_to_bar_subdivisions(kick_onsets_sec, bar_start_time_in_segment, bar_duration),
+                "snare_events": self._quantize_onsets_to_bar_subdivisions(snare_onsets_sec, bar_start_time_in_segment, bar_duration),
+                "hihat_events": self._quantize_onsets_to_bar_subdivisions(hihat_onsets_sec, bar_start_time_in_segment, bar_duration),
+                "bass_events": self._quantize_onsets_to_bar_subdivisions(bass_onsets_sec, bar_start_time_in_segment, bar_duration),
+                "bar_start_time_sec": round(bar_start_time_in_segment + (audio_offset_sec if audio_offset_sec else 0.0), 3), # Absolute time in original audio
                 "bar_duration_sec": round(bar_duration, 3)
             }
             song_features.append(bar_feat)
-            if (i + 1) % 10 == 0 or (i + 1) == num_bars: 
-                 print(f"{LOG_PREFIX_BFE} [{song_basename}] Processed bar {i+1}/{num_bars}.", flush=True)
+            # if (i + 1) % 10 == 0 or (i + 1) == num_bars_in_segment: 
+                 # print(f"{LOG_PREFIX_BFE} [{song_basename}] Processed bar {i+1}/{num_bars_in_segment} of segment.", flush=True)
         
-        print(f"{LOG_PREFIX_BFE} [{song_basename}] Finished feature extraction. Total bars with features: {len(song_features)}.", flush=True)
+        print(f"{LOG_PREFIX_BFE} [{song_basename}] Finished feature extraction for segment. Total bars with features: {len(song_features)}.", flush=True)
         return song_features
 
 
 if __name__ == "__main__":
-    import soundfile as sf 
+    # This __main__ block in BeatFeatureExtractor is for its own testing,
+    # not directly called by the rhythm_visualizer.
+    # It would need updates to test the offset/duration functionality if desired.
+    import soundfile as sf_dummy # Renamed to avoid conflict with global sf
     
     dummy_data_dir = os.path.join("data", "temp_testing_bfe") 
     dummy_instrumentals_dir = os.path.join(dummy_data_dir, "instrumentals")
-    dummy_stems_base_dir = os.path.join(dummy_data_dir, "stems_separated_bfe")
-    
     os.makedirs(dummy_instrumentals_dir, exist_ok=True)
-
     dummy_sr = 44100
-    dummy_duration = 20 
+    dummy_full_duration = 60 # seconds for a longer dummy track
     
-    dummy_instrumental_audio = np.random.rand(dummy_sr * dummy_duration) * 0.2 - 0.1
-    for i in range(int(dummy_duration * 2)): 
+    # Create a longer dummy track to test offset/duration
+    dummy_instrumental_audio_full = np.random.rand(dummy_sr * dummy_full_duration) * 0.2 - 0.1
+    for i in range(int(dummy_full_duration * 2)): 
         pulse_time = i * 0.5
-        if pulse_time + 0.1 < dummy_duration:
+        if pulse_time + 0.1 < dummy_full_duration:
             start_sample = int(pulse_time * dummy_sr)
             end_sample = int((pulse_time + 0.05) * dummy_sr)
-            if start_sample < len(dummy_instrumental_audio) and end_sample < len(dummy_instrumental_audio) and start_sample < end_sample:
-                dummy_instrumental_audio[start_sample : end_sample] += 0.3 * np.random.rand(end_sample - start_sample)
+            if start_sample < len(dummy_instrumental_audio_full) and end_sample < len(dummy_instrumental_audio_full) and start_sample < end_sample:
+                dummy_instrumental_audio_full[start_sample : end_sample] += 0.3 * np.random.rand(end_sample - start_sample)
 
-    dummy_instrumental_path = os.path.join(dummy_instrumentals_dir, "dummy_song_bfe.wav")
-    sf.write(dummy_instrumental_path, dummy_instrumental_audio, dummy_sr)
-    print(f"Created dummy instrumental: {dummy_instrumental_path}", flush=True)
-
-    demucs_model_name = "htdemucs_ft" 
-    dummy_song_stems_dir = os.path.join(dummy_stems_base_dir, demucs_model_name, "dummy_song_bfe")
-    os.makedirs(dummy_song_stems_dir, exist_ok=True)
-    
-    dummy_drums_stem = np.random.rand(dummy_sr * dummy_duration) * 0.15 - 0.075
-    sf.write(os.path.join(dummy_song_stems_dir, "drums.wav"), dummy_drums_stem, dummy_sr)
-    print(f"Created dummy drums stem: {os.path.join(dummy_song_stems_dir, 'drums.wav')}", flush=True)
-    
-    dummy_bass_stem = np.random.rand(dummy_sr * dummy_duration) * 0.1 - 0.05
-    sf.write(os.path.join(dummy_song_stems_dir, "bass.wav"), dummy_bass_stem, dummy_sr)
-    print(f"Created dummy bass stem: {os.path.join(dummy_song_stems_dir, 'bass.wav')}", flush=True)
-
+    dummy_instrumental_path_full = os.path.join(dummy_instrumentals_dir, "dummy_song_bfe_full.wav")
+    sf_dummy.write(dummy_instrumental_path_full, dummy_instrumental_audio_full, dummy_sr)
+    print(f"Created dummy full instrumental: {dummy_instrumental_path_full}", flush=True)
 
     extractor = BeatFeatureExtractor(sample_rate=dummy_sr)
     
-    print("\n--- Test Case 1: Using dummy instrumental, no specific stems_input_dir provided ---", flush=True)
-    song_features_case1 = extractor.extract_features_for_song(dummy_instrumental_path, stems_input_dir=None)
-    if song_features_case1:
-        print(f"Extracted {len(song_features_case1)} bars of features (Case 1).", flush=True)
-        if len(song_features_case1) > 0: print("First bar (Case 1):", song_features_case1[0], flush=True)
-    else:
-        print(f"Could not extract features (Case 1).", flush=True)
+    print("\n--- Test Case 1: Full dummy instrumental ---", flush=True)
+    features_full = extractor.extract_features_for_song(dummy_instrumental_path_full)
+    if features_full: print(f"Extracted {len(features_full)} bars (Full). First bar BPM: {features_full[0]['bpm'] if features_full else 'N/A'}")
 
-    print("\n--- Test Case 2: Using dummy instrumental AND providing the dummy_song_stems_dir ---", flush=True)
-    song_features_case2 = extractor.extract_features_for_song(dummy_instrumental_path, stems_input_dir=dummy_song_stems_dir)
-    if song_features_case2:
-        print(f"Extracted {len(song_features_case2)} bars of features (Case 2).", flush=True)
-        if len(song_features_case2) > 0: print("First bar (Case 2):", song_features_case2[0], flush=True)
-    else:
-        print(f"Could not extract features (Case 2).", flush=True)
+    print("\n--- Test Case 2: Segment of dummy instrumental (offset 10s, duration 20s) ---", flush=True)
+    features_segment = extractor.extract_features_for_song(dummy_instrumental_path_full, 
+                                                           audio_offset_sec=10.0, 
+                                                           audio_duration_sec=20.0)
+    if features_segment: 
+        print(f"Extracted {len(features_segment)} bars (Segment). First bar BPM: {features_segment[0]['bpm'] if features_segment else 'N/A'}")
+        if features_segment:
+            print(f"  First bar in segment starts at original audio time: {features_segment[0]['bar_start_time_sec']:.2f}s (should be >= 10.0s)")
+            assert features_segment[0]['bar_start_time_sec'] >= 10.0 - 0.5 # Allow for some beat detection variance
 
-    if song_features_case1 and song_features_case2 and len(song_features_case1) > 0 and len(song_features_case2) > 0:
-        if song_features_case1[0]["kick_events"] != song_features_case2[0]["kick_events"]:
-            print("\nNote: Kick events differ between Case 1 (full mix) and Case 2 (stems), as expected if stems provide clearer signal.", flush=True)
-        else:
-            print("\nNote: Kick events are the same. This might happen if stems are very similar to full mix for kicks or onset detection parameters are not sensitive enough.", flush=True)
-
+    # Cleanup (optional)
     # import shutil
     # if os.path.exists(dummy_data_dir):
     #     shutil.rmtree(dummy_data_dir)
-    #     print(f"\nCleaned up dummy data directory: {dummy_data_dir}", flush=True)
