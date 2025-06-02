@@ -4,14 +4,12 @@ import numpy as np
 from typing import List, Dict, Tuple, Optional, Any
 from beefai.utils.data_types import FlowDatum, FlowData, SongBeatFeatures, LyricsData, BarBeatFeatures, WordTiming, SyllableDetail
 from beefai.data_processing.text_processor import TextProcessor
+from beefai.flow_model.tokenizer import FlowTokenizer # Add this import
 import os
 import json
 
-DEBUG_FLOW_EXTRACTOR = True # Keep this for user control
+DEBUG_FLOW_EXTRACTOR = False # Keep this for user control
 LOG_PREFIX_FDE = "[FDE]" # For new, non-debug logs
-
-# Duration bins from FlowDataExtractor (for quantizing syllable durations)
-SYLLABLE_DURATION_BINS_SEC_FDE = [0.05, 0.1, 0.15, 0.2, 0.25, 0.3, 0.4, 0.5, 0.6, 0.75, 1.0, 1.5] 
 
 
 def parse_whisper_timestamped_json(json_file_path: str) -> Optional[LyricsData]:
@@ -69,9 +67,11 @@ def parse_whisper_timestamped_json(json_file_path: str) -> Optional[LyricsData]:
 
 class FlowDataExtractor:
     def __init__(self, 
+                 tokenizer: FlowTokenizer, # Add tokenizer instance
                  sample_rate_for_acapella: int = 44100, 
                  subdivisions_per_bar: int = 16 
                 ): 
+        self.tokenizer = tokenizer # Store tokenizer instance
         self.sample_rate = sample_rate_for_acapella 
         self.text_processor = TextProcessor() 
         self.subdivisions_per_bar = subdivisions_per_bar
@@ -171,13 +171,6 @@ class FlowDataExtractor:
         if DEBUG_FLOW_EXTRACTOR: print(f"{LOG_PREFIX_FDE} DEBUG _segment_words_into_phrases: Segmented into {len(phrases_of_words)} phrases.", flush=True)
         return phrases_of_words
 
-    def _quantize_duration_to_bin_fde(self, duration_sec: float) -> int:
-        """Quantizes duration in seconds to a bin index using SYLLABLE_DURATION_BINS_SEC_FDE."""
-        for idx, upper_edge_s in enumerate(SYLLABLE_DURATION_BINS_SEC_FDE):
-            if duration_sec <= upper_edge_s:
-                return idx
-        return len(SYLLABLE_DURATION_BINS_SEC_FDE) 
-
     def _create_flow_datum_for_bar_segment(self, 
                                      words_in_bar_segment: List[WordTiming], 
                                      target_bar_info: BarBeatFeatures, 
@@ -198,7 +191,9 @@ class FlowDataExtractor:
         
         target_bar_index = target_bar_info["bar_index"]
         bpm_of_bar = target_bar_info.get("bpm", 0.0)
-        if bpm_of_bar <= 0: return None
+        if bpm_of_bar <= 0: 
+            if DEBUG_FLOW_EXTRACTOR: print(f"{LOG_PREFIX_FDE} DEBUG _create_flow_datum: Invalid BPM ({bpm_of_bar}) for bar {target_bar_index}. Cannot quantize syllable durations properly. Skipping datum.", flush=True)
+            return None # Crucial: need BPM for tokenizer's quantization
         
         beats_in_target_bar = target_bar_info.get("time_signature", (4,4))[0]
         beat_duration_sec = 60.0 / bpm_of_bar
@@ -231,7 +226,11 @@ class FlowDataExtractor:
             syllable_start_subdivisions.append(subdivision_index)
 
             syl_duration_raw_sec = syl_abs_end_time - syl_abs_start_time
-            quantized_dur_idx = self._quantize_duration_to_bin_fde(syl_duration_raw_sec)
+            # Use tokenizer's quantization method, which takes duration in SECONDS and BPM
+            quantized_dur_idx = self.tokenizer.quantize_syllable_duration_to_bin_index(
+                duration_sec=syl_duration_raw_sec, 
+                bpm=bpm_of_bar
+            )
             syllable_durations_quantized_indices.append(quantized_dur_idx)
             syllable_stress_values.append(syl_stress)
         
@@ -240,7 +239,7 @@ class FlowDataExtractor:
             print(f"{LOG_PREFIX_FDE} DEBUG _create_flow_datum: Bar {target_bar_index}, LineInBar {line_idx_in_bar}, SylText: '{line_text_for_debug}...' ({total_syllables_in_segment} syls)", flush=True)
             # print(f"    Syls: {total_syllables_in_segment}, Offset: {start_offset_beats:.2f}b, Dur: {duration_beats:.2f}b", flush=True)
             # print(f"    Subdivs: {syllable_start_subdivisions}", flush=True)
-            # print(f"    QuantSylDurs_FDE: {syllable_durations_quantized_indices}", flush=True)
+            print(f"    QuantSylDurs_TokenizerBeats: {syllable_durations_quantized_indices}", flush=True) # Updated debug print
             # print(f"    SylStresses: {syllable_stress_values}", flush=True)
         
         return {
@@ -404,7 +403,9 @@ if __name__ == '__main__':
         {"bar_index": 4, "bpm": 120.0, "time_signature": (4, 4), "bar_start_time_sec": 8.0, "bar_duration_sec": 2.0, "kick_events": [], "snare_events": [], "hihat_events": [], "bass_events": []}
     ]
 
-    flow_extractor = FlowDataExtractor(subdivisions_per_bar=16)
+    # Initialize FlowTokenizer for the FlowDataExtractor
+    flow_tokenizer = FlowTokenizer()
+    flow_extractor = FlowDataExtractor(tokenizer=flow_tokenizer, subdivisions_per_bar=16)
     print(f"\n--- Running Test with FlowDataExtractor (with Syllable Stress) ---", flush=True)
     extracted_flow_data = flow_extractor.extract_flow_for_song(dummy_json_path, dummy_sbf)
     

@@ -1,6 +1,6 @@
 # beefai/evaluation/rhythm_visualizer.py
 import torch
-import torch.nn.functional as F # <<<<<<<<<<<<<<<<<<<<<<< ADD THIS IMPORT
+import torch.nn.functional as F
 import os
 import sys
 import yaml
@@ -23,7 +23,7 @@ from beefai.utils.data_types import BeatInfo, FlowData, FlowDatum, BarBeatFeatur
 DEFAULT_MODEL_CONFIG_PATH = "lite_model_training/model_config_full.yaml"
 DEFAULT_TOKENIZER_CONFIG_PATH = "beefai/flow_model/flow_tokenizer_config_v2.json" 
 DEFAULT_CHECKPOINT_PATH = "data/checkpoints/flow_model_full/full_final_model.pt" 
-DEFAULT_INSTRUMENTAL_PATH = "data/instrumentals/HiiiPower.wav" 
+DEFAULT_INSTRUMENTAL_PATH = "data/instrumentals/blackertheberry2.mp3" 
 DEFAULT_INSTRUMENTAL_OFFSET_SEC = None 
 DEFAULT_INSTRUMENTAL_DURATION_SEC = None 
 
@@ -305,7 +305,9 @@ def _generate_flow_core(
     context_bar_idx_start: int, 
     output_name_suffix: str,
     force_offset_on_beat_one_bias: Optional[float] = None, # New parameter
-    energy_bias_params: Optional[Dict[str, float]] = None # New param for energy {syl_count_bias: val, short_syl_dur_bias: val}
+    energy_bias_params: Optional[Dict[str, float]] = None, # New param for energy {syl_count_bias: val, short_syl_dur_bias: val}
+    temperature: float = 0.8, # NEW PARAMETER
+    top_k: int = 0,           # NEW PARAMETER (0 for no top_k filtering)
 ) -> Tuple[Optional[FlowData], Optional[FlowTokenizer], Optional[FlowGPTConfig]]:
     
     if not os.path.exists(tokenizer_config_path):
@@ -394,6 +396,7 @@ def _generate_flow_core(
 
 
     print(f"Generating flow for song, starting from bar {current_bar_being_generated_flow_for}, up to ~{max_song_bars} bars or {max_total_tokens_safety_net} tokens...")
+    # print(f"Initial context (last 50 tokens): {[tokenizer.id_to_token.get(tid, str(tid)) for tid in full_song_context_token_ids[-50:]]}")
 
     for step_count in range(max_total_tokens_safety_net - len(full_song_context_token_ids)):
         idx_cond = torch.tensor([full_song_context_token_ids[-gpt_config.block_size:]], dtype=torch.long, device=DEVICE)
@@ -426,17 +429,21 @@ def _generate_flow_core(
                         logits[0, -1, syl_dur_id] += energy_bias_params["short_syl_dur_bias"]
 
 
-        logits = logits[:, -1, :] / 0.7 
+        logits = logits[:, -1, :] / temperature 
         
         # Corrected top_k application
-        current_top_k = 50 # Make top_k a variable
-        if current_top_k is not None and current_top_k > 0: # Check if it's a valid number
-            v, _ = torch.topk(logits, min(current_top_k, logits.size(-1)))
+        if top_k is not None and top_k > 0: # Check if it's a valid number
+            v, _ = torch.topk(logits, min(top_k, logits.size(-1)))
             logits[logits < v[:, [-1]]] = -float('Inf')
         
         probs = F.softmax(logits, dim=-1)
         next_token_id = torch.multinomial(probs, num_samples=1).item()
-        next_token_str = tokenizer.id_to_token.get(next_token_id, "[UNK_ID]")
+        next_token_str = tokenizer.id_to_token.get(next_token_id, f"[UNK_ID:{next_token_id}]")
+
+        # Optional: Log the top K probabilities for the chosen token
+        # top_k_probs, top_k_indices = torch.topk(probs, 5)
+        # print(f"  Step {step_count}: Gen: {next_token_str} (ID: {next_token_id}). Top 5 Probs: " + 
+        #       ", ".join([f"{tokenizer.id_to_token.get(idx.item())}({p.item():.3f})" for idx, p in zip(top_k_indices[0], top_k_probs[0])]))
 
         # Update generation phase based on the token *just generated*
         if next_token_str.startswith("[SYLLABLES_"): current_gen_phase = "EXPECTING_OFFSET_BIN"
@@ -493,6 +500,12 @@ def _generate_flow_core(
             generated_flow_tokens_for_song.append(line_start_tok_guidance)
             current_gen_phase = "EXPECTING_SYLLABLES_COUNT" # Update phase after guidance
 
+    print("\n--- Raw Generated Flow Tokens (Full Song) ---")
+    decoded_tokens_for_print = [tokenizer.id_to_token.get(token_id, str(token_id)) for token_id in generated_flow_tokens_for_song]
+    tokens_per_line_log = 15
+    for i in range(0, len(decoded_tokens_for_print), tokens_per_line_log):
+        print(" ".join(decoded_tokens_for_print[i:i+tokens_per_line_log]))
+    print("--- End of Raw Generated Flow Tokens ---\n")
 
     decoded_flow_data_full_song: FlowData = []
     idx_in_gen_flow_tokens = 0
@@ -522,7 +535,7 @@ def _generate_flow_core(
         temp_line_parser_idx = idx_in_gen_flow_tokens 
         
         while temp_line_parser_idx < len(generated_flow_tokens_for_song):
-            token_id = generated_flow_tokens_for_song[temp_line_parser_idx]
+            token_id = generated_flow_tokens_for_this_line_attempt[temp_line_parser_idx]
             tokens_for_this_line_attempt.append(token_id)
             if token_id == tokenizer.end_syllable_sequence_token_id:
                 break
@@ -581,6 +594,8 @@ def visualize_flow_rhythm(
     num_prompt_bars: int = 2, 
     output_filename_prefix: str = "flow_vis_audio",
     output_format: str = "wav",
+    generation_temperature: float = 0.8, # New parameter
+    generation_top_k: int = 0,           # New parameter (0 for no top_k)
     # New parameters for controlling generation biases
     force_offset_on_beat_one_bias_strength: Optional[float] = None, # e.g., 2.0
     energy_syl_count_bias_strength: Optional[float] = None,      # e.g., 1.0
@@ -592,6 +607,7 @@ def visualize_flow_rhythm(
     print(f"Instrumental: {instrumental_audio_path}" + 
           (f" (Offset: {instrumental_offset_sec}s" if instrumental_offset_sec is not None else "") +
           (f", Duration: {instrumental_duration_sec}s" if instrumental_duration_sec is not None else "") + ")")
+    print(f"Generation params: Temperature {generation_temperature}, Top-K {generation_top_k}")
     if force_offset_on_beat_one_bias_strength:
         print(f"Applying bias for [OFFSET_BIN_0]: {force_offset_on_beat_one_bias_strength}")
     if energy_syl_count_bias_strength or energy_short_syl_dur_bias_strength:
@@ -662,7 +678,9 @@ def visualize_flow_rhythm(
         context_bar_idx_start=context_bar_idx_start_for_gen,
         output_name_suffix=f"from_{os.path.splitext(os.path.basename(instrumental_audio_path))[0]}",
         force_offset_on_beat_one_bias=force_offset_on_beat_one_bias_strength,
-        energy_bias_params=energy_bias_params_dict
+        energy_bias_params=energy_bias_params_dict,
+        temperature=generation_temperature, # Pass new parameter
+        top_k=generation_top_k,           # Pass new parameter
     )
 
     if not tokenizer_instance: 
@@ -736,6 +754,11 @@ if __name__ == "__main__":
     # param_energy_short_syl_dur = None
     # --- End Bias Parameters ---
 
+    # --- Parameters for controlling generation sampling ---
+    param_generation_temp = 0.8  # Default or user choice
+    param_generation_top_k = 0   # Default to 0 (no top-k filtering) or e.g. 50
+    # --- End Sampling Parameters ---
+
     if not os.path.exists(main_checkpoint_path):
         print(f"ERROR: Default model checkpoint '{main_checkpoint_path}' not found.")
     elif not os.path.exists(main_model_config):
@@ -754,6 +777,8 @@ if __name__ == "__main__":
             instrumental_duration_sec=main_instrumental_duration,
             output_format="wav", 
             num_prompt_bars=2,
+            generation_temperature=param_generation_temp,
+            generation_top_k=param_generation_top_k,
             force_offset_on_beat_one_bias_strength=param_force_offset_on_beat_one,
             energy_syl_count_bias_strength=param_energy_syl_count,
             energy_short_syl_dur_bias_strength=param_energy_short_syl_dur

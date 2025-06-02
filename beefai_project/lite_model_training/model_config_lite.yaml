@@ -1,0 +1,8 @@
+block_size: 128      # Max sequence length (reduced)
+n_layer: 3           # Number of Transformer layers (reduced)
+n_head: 4            # Number of attention heads (reduced)
+n_embd: 256          # Embedding dimension (reduced, must be div by n_head)
+max_segment_types: 384 # Increased from 128 (allows for ~191 bars)
+max_intra_line_positions: 96 # Seems okay based on current observations
+dropout: 0.1
+bias: True

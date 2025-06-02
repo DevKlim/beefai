@@ -1,0 +1,25 @@
+block_size: 256      # Max sequence length (context window) - Keep as is for now.
+                     # Increasing this significantly impacts VRAM.
+n_layer: 6           # Number of Transformer layers - Standard for "full" in this project.
+n_head: 8            # Number of attention heads - Standard.
+n_embd: 512          # Embedding dimension - Standard.
+
+max_segment_types: 2048 
+max_intra_line_positions: 96 
+dropout: 0.1
+bias: True           
+
+# Training specific (Optimized for RTX 3060 12GB)
+batch_size: 24       # Increased from 16. With 12GB VRAM and AMP, you can likely handle a larger batch.
+                     # Monitor VRAM. If OOM, reduce to 20 or 16.
+learning_rate: 0.0003 # Keep as is, a good starting point.
+epochs: 500          # Keep as is, or adjust based on convergence.
+grad_accumulation_steps: 2 # Reduced from 4. Effective batch size = 24*2 = 48.
+                           # This means optimizer steps more frequently.
+                           # If VRAM allows batch_size: 32, grad_accumulation_steps: 1 or 2.
+                           # If VRAM is tight with batch_size: 24, you might keep grad_accumulation_steps: 2 or increase to 3.
+eval_interval_steps: 200
+save_interval_steps: 4000
+save_checkpoint_every_n_epochs: 100 # New: Save a checkpoint every N epochs. Set to 1 to save every epoch.
+weight_decay: 0.01
+seed: 153 # For reproducibility
