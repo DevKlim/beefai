@@ -1,32 +1,21 @@
-# Core ML and Data
-torch --index-url https://download.pytorch.org/whl/cu118
-torchaudio --index-url https://download.pytorch.org/whl/cu118
-torchvision --index-url https://download.pytorch.org/whl/cu118
-numpy
-scipy>=1.7.0 # Ensure a version compatible with librosa
-pandas
-PyYAML
-
-# Audio Processing
-librosa>=0.9.0 # Later versions handle scipy.signal.get_window better
-soundfile
-pydub
-audioread # librosa dependency, sometimes needs explicit install
-resampy # librosa dependency
-
-# Text Processing
+torch
+librosa
 pyphen
-nltk # For text processing, if used more broadly later
-phonemizer # For phoneme generation
-
-# Alignment & Separation (CLI tools, but Python wrappers might be used)
+phonemizer
 whisper-timestamped
-demucs # Optional, for source separation
-audio-separator # Optional, for source separation (UVR models)
-
-# Web App (if running the webapp part)
-# Flask # Example, if you decide to use a Python backend for webapp
-
-# Utilities
+numpy
+scipy
+pyyaml
 tqdm
 python-dotenv
+yt-dlp
+lyricsgenius
+soundfile
+spotipy 
+langdetect
+requests
+# Add any other specific versions if necessary
+# For phonemizer, if espeak-ng is used, it's a system dependency:
+#sudo apt-get install espeak-ng (Linux)
+#brew install espeak (macOS)
+# Download from https://github.com/espeak-ng/espeak-ng/releases (Windows) and add to PATH or set ESPEAK_NG_PATH

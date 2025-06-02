@@ -1,0 +1,23 @@
+# Core ML/DL
+torch
+torchvision
+torchaudio
+
+# TensorBoard for visualization
+tensorboard
+
+# Utilities
+pyyaml # For loading .yaml config files
+tqdm   # For progress bars
+numpy
+scipy
+
+# Data Processing Specific (already part of your project's context)
+librosa
+pyphen
+# whisper-timestamped # If installing via pip, add it here. Relies on ffmpeg.
+# lyricsgenius # For the download_youtube_lyrics.py script
+
+# Optional Source Separation tools (can be installed separately if needed)
+# demucs
+# audio-separator

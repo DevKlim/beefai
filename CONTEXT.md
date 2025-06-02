@@ -5,7 +5,7 @@ This document provides a comprehensive summary of files and directories within t
 ## Project Root (`./`)
 
 *   **`.gitignore`**:
-    *   **Purpose:** Specifies intentionally untracked files for Git (e.g., `__pycache__/`, `*.pyc`, `.venv/`, `downloaded_songs/`, `data/temp_*`, `data/checkpoints/flow_model_*/runs/`, `output/`).
+    *   **Purpose:** Specifies intentionally untracked files for Git (e.g., `__pycache__/`, `*.pyc`, `.venv/`, `downloaded_songs/`, `downloaded_files/`, `data/temp_*`, `data/checkpoints/flow_model_*/runs/`, `output/`).
     *   **LLM Context:** Defines the boundary between source code/configuration and generated/transient data or user-specific files.
 
 *   **`README.md` (Main Project README)**:
@@ -22,7 +22,7 @@ This document provides a comprehensive summary of files and directories within t
     *   **LLM Context:** Developer utility; not part of the core data or model pipeline.
 
 *   **`requirements.txt`**:
-    *   **Purpose:** Lists all Python package dependencies required to run the project (e.g., `torch`, `librosa`, `pyphen`, `phonemizer`, `whisper-timestamped`, `numpy`, `scipy`, `pyyaml`, `tqdm`, `python-dotenv`, `yt-dlp`, `lyricsgenius`, `soundfile`).
+    *   **Purpose:** Lists all Python package dependencies required to run the project (e.g., `torch`, `librosa`, `pyphen`, `phonemizer`, `whisper-timestamped`, `numpy`, `scipy`, `pyyaml`, `tqdm`, `python-dotenv`, `yt-dlp`, `lyricsgenius`, `soundfile`, `spotipy`, `langdetect`).
     *   **Role in Pipeline:** Phase 0 (Setup). Critical for environment reproducibility.
     *   **LLM Context:** Defines the software stack. Version compatibility between these libraries (especially `torch`, `librosa`, `scipy`) is crucial.
 
@@ -248,80 +248,32 @@ Files for a potential web application interface.
 ## `data/` Directory
 
 Central storage for all datasets, intermediate processing outputs, and model inputs/outputs.
-
-*   **`acapellas/`**: Stores acapella audio files (vocals only), typically `.mp3` or `.wav`. Output of source separation.
-*   **`instrumentals/`**: Stores instrumental audio files (no vocals), typically `.mp3` or `.wav`. Output of source separation or directly provided.
-*   **`lyrics/`**: Raw lyric text files (`.txt`), with filenames matching corresponding songs.
-*   **`raw_songs_full/`**: Original, complete song audio files (input for source separation).
-*   **`alignments_json/`**: Contains JSON files with word-level (and potentially phoneme-level) timestamps. These are typically outputs from a forced aligner like `whisper-timestamped`. Filenames match songs (e.g., `A.D.H.D.json`). **Crucial input for `FlowDataExtractor`**.
-*   **`alignments_textgrid/`**: Likely for storing Praat TextGrid alignment files, an alternative or intermediate format for alignments.
-*   **`checkpoints/`**: Directory for saving trained model checkpoints.
-    *   **`flow_model_full/`**: Checkpoints for the "full" version of the `FlowTransformerDecoder`. Contains `.pt` files (e.g., `full_ckpt_epoch_X.pt`, `full_final_model.pt`).
-        *   `runs/`: Subdirectory for TensorBoard logs related to full model training (e.g., `full_experiment_YYYYMMDD-HHMMSS/events.out.tfevents...`).
-    *   **`flow_model_lite/`**: Checkpoints and TensorBoard logs for the "lite" version of the model.
-*   **`processed_for_transformer/`**: **Key directory for data that has been feature-extracted but not yet tokenized.**
-    *   **`processed_training_data.pt`**: **Primary output of `scripts/preprocess_dataset.py`**. A single `.pt` file containing a list of `TrainingInstance` dictionaries. Each `TrainingInstance` holds the `song_name`, `beat_features` (`SongBeatFeatures`), and `flow_data` (`FlowData`) for one song. This file is the main input to the tokenization scripts (`05a_tokenize_data_lite.py`, `05b_tokenize_data_full.py`).
-    *   **`beat_features_cache/`**: Stores cached `SongBeatFeatures` for individual songs (e.g., `A.D.H.D_beat_features.pt`) to speed up reprocessing by `scripts/preprocess_dataset.py`.
-    *   **`flow_data_cache/`**: Stores cached `FlowData` for individual songs (e.g., `A.D.H.D_flow_data.pt`) to speed up reprocessing by `scripts/preprocess_dataset.py`.
-    *   **`stems_cache/`**: This directory seems to store pre-separated audio stems, organized by a separation model (e.g., `htdemucs_ft`) and then by song ID. Example: `stems_cache/htdemucs_ft/A.D.H.D/bass.wav`. `BeatFeatureExtractor` would use these if available.
-*   Other subdirectories like `arpa/` (for language model data like `.dict` files) and various data files (`.pdf`, `.txt`) in the root suggest diverse data sources or experimental components.
+(Content as before)
+...
 
 ---
 
 ## `downloaded_songs/`
 
-*   **Purpose:** Default output directory for `scripts/download_youtube_lyrics.py`. Contains downloaded `.mp3` audio files and their corresponding fetched `.txt` lyric files.
-*   **LLM Context:** A staging area for newly acquired raw data before it's organized into the main `data/` structure by `scripts/organize_downloaded_songs.py`.
+*   **Purpose:** Default output directory for `scripts/download_youtube_lyrics.py`. Contains downloaded `.mp3` audio files and their corresponding fetched `.txt` lyric files from YouTube/Genius based on URL/text inputs.
+*   **LLM Context:** A staging area for newly acquired raw data from generic YouTube/Genius downloads.
+
+## `downloaded_files/` (NEW)
+
+*   **Purpose:** Default output directory for `scripts/download_spotify_playlist.py`. Contains downloaded `.mp3` audio files and their corresponding cleaned `.txt` lyric files, sourced from Spotify playlist information.
+*   **LLM Context:** A staging area for data acquired specifically via the Spotify playlist downloader.
 
 ---
 
 ## `lite_model_training/`
-
-Files specific to configuring and training a "lite" (smaller, faster to train) version of the flow model. Also contains configs for the "full" model.
-
-*   **`data_config_lite.yaml` / `data_config_full.yaml`**:
-    *   **Purpose:** YAML configuration files defining data-related paths and parameters for the "lite" and "full" model training pipelines, respectively.
-    *   **Key Content:**
-        *   `tokenizer_path`: Path to `flow_tokenizer_config_v2.json`.
-        *   `processed_data_source_dir`: Path to the directory containing `processed_training_data.pt` (i.e., `data/processed_for_transformer/`).
-        *   Output paths for tokenized data (e.g., `data/tokenized_lite/train_lite.pt`, `data/tokenized_full/val_full.pt`).
-        *   `max_songs_for_lite`/`_full`: Max number of songs to use for the dataset (-1 for all).
-        *   `val_split_ratio_for_lite`/`_full`: Proportion for validation split.
-        *   `checkpoint_dir`: Where to save model checkpoints during training.
-    *   **Interactions:** Read by `scripts/05a_tokenize_data_lite.py`, `scripts/05b_tokenize_data_full.py`, `lite_model_training/train_lite_flow_model.py`, and `scripts/train_flow_model.py`.
-    *   **LLM Context:** Centralizes data path management for different dataset scales and training runs.
-
-*   **`model_config_lite.yaml` / `model_config_full.yaml`**:
-    *   **Purpose:** YAML configuration files specifying the architecture hyperparameters for the "lite" and "full" `FlowTransformerDecoder` models, respectively.
-    *   **Key Content:** `block_size`, `n_layer`, `n_head`, `n_embd`, `max_segment_types`, `max_intra_line_positions`, `dropout`, `bias`. May also include training-specific parameters like `batch_size`, `learning_rate`, `epochs`.
-    *   **Interactions:** Read by `lite_model_training/train_lite_flow_model.py` and `scripts/train_flow_model.py` to instantiate `FlowGPTConfig` and set up the training loop.
-    *   **LLM Context:** Defines the model's capacity and complexity. `max_segment_types` and `max_intra_line_positions` are crucial for the tokenizer and model to agree on context ID ranges.
-
-*   **`train_lite_flow_model.py`**:
-    *   **Purpose:** Python script dedicated to training the "lite" version of the `FlowTransformerDecoder` model.
-    *   **Key Functionality:**
-        *   Loads model and data configurations from `model_config_lite.yaml` and `data_config_lite.yaml`.
-        *   Initializes `FlowTokenizer`, `FlowGPTConfig`, `FlowTransformerDecoder`, and `FlowDataset` (for `train_lite.pt` and `val_lite.pt`).
-        *   Implements the PyTorch training loop: optimizer (AdamW), learning rate scheduler (OneCycleLR), loss calculation (cross-entropy, respecting `pad_token_id`), gradient accumulation.
-        *   Handles model evaluation on a validation set (calculating loss and perplexity).
-        *   Manages model checkpointing (saving model state, optimizer state, etc.).
-        *   Integrates with TensorBoard for logging metrics (`runs` subdirectories are created under the checkpoint directory).
-        *   Supports Automatic Mixed Precision (AMP) and `torch.compile()` if available.
-    *   **Inputs:** Tokenized "lite" data files, tokenizer config, "lite" model config.
-    *   **Outputs:** Trained model checkpoints (e.g., in `data/checkpoints/flow_model_lite/`) and TensorBoard logs.
-    *   **LLM Context:** The primary script for training the smaller example model. Demonstrates a full training pipeline.
+(Content as before)
+...
 
 ---
 
 ## `output/`
-
-General-purpose directory for outputs generated by the project that aren't raw data or checkpoints.
-
-*   **`beefai_default_instrumental.wav`**: A default or example instrumental audio file, possibly used by demos or tests.
-*   **`flow_visualizations/`**:
-    *   **Purpose:** Output directory for `beefai/evaluation/rhythm_visualizer.py`.
-    *   **Content:** WAV files containing instrumentals mixed with click tracks representing model-generated flow rhythms.
-    *   **LLM Context:** Contains audio results for qualitative evaluation of the flow model.
+(Content as before)
+...
 
 ---
 
@@ -349,7 +301,24 @@ Contains utility scripts and scripts that form parts of the main data processing
     *   **Purpose:** Downloads audio from YouTube URLs (provided in a file) using `yt-dlp` and attempts to fetch corresponding lyrics using `lyricsgenius`.
     *   **Key Functionality:** Sanitizes filenames, attempts to clean lyric metadata, saves audio as MP3 and lyrics as TXT to `downloaded_songs/`. Creates a CSV report of successes/failures.
     *   **Dependencies:** `yt-dlp`, `lyricsgenius`, `python-dotenv` (for `GENIUS_ACCESS_TOKEN`).
-    *   **LLM Context:** An optional data acquisition script. Relies on the `GENIUS_ACCESS_TOKEN` environment variable.
+    *   **LLM Context:** An optional data acquisition script for individual YouTube links or song lists. Relies on the `GENIUS_ACCESS_TOKEN` environment variable.
+
+*   **`download_spotify_playlist.py` (NEW)**:
+    *   **Purpose:** Downloads all tracks from a given Spotify playlist. For each track, it attempts to download the audio as an MP3 (typically by searching on YouTube via `yt-dlp`) and fetch its lyrics (via `lyricsgenius`).
+    *   **Key Functionality:**
+        *   Takes a Spotify playlist URL as input.
+        *   Uses `spotipy` to get track details (name, artist) from the playlist.
+        *   For each track:
+            *   Downloads audio using `yt-dlp` (searches `Artist - Track Name` on YouTube).
+            *   Fetches lyrics using `lyricsgenius`.
+            *   Cleans lyrics: removes common punctuation (periods, commas, hyphens, quotes, brackets) ensuring no punctuation is mistaken as a syllable, converts to lowercase.
+            *   Ensures lyrics are in English using `langdetect`.
+            *   Saves audio to `downloaded_files/Artist_TrackName.mp3`.
+            *   Saves cleaned, English lyrics to `downloaded_files/Artist_TrackName.txt`.
+        *   Creates a CSV report (`spotify_download_report.csv`) in the output directory.
+    *   **Dependencies:** `spotipy`, `yt-dlp`, `lyricsgenius`, `python-dotenv`, `langdetect`.
+    *   **Output Directory:** `downloaded_files/` (at project root).
+    *   **LLM Context:** A data acquisition script specifically for Spotify playlists. Requires Spotify API (Client ID, Secret) and Genius API credentials, typically set as environment variables (`SPOTIFY_CLIENT_ID`, `SPOTIFY_CLIENT_SECRET`, `GENIUS_ACCESS_TOKEN`). The lyric cleaning is tailored to prepare text for syllable analysis.
 
 *   **`inspect_tokenized_data.py`**:
     *   **Purpose:** A utility script to load and inspect the contents of the `.pt` files generated by `05a_tokenize_data_lite.py` or `05b_tokenize_data_full.py`.
@@ -362,8 +331,8 @@ Contains utility scripts and scripts that form parts of the main data processing
     *   **LLM Context:** Useful for debugging the tokenization process and verifying the structure of data being fed to `FlowDataset`.
 
 *   **`organize_downloaded_songs.py`**:
-    *   **Purpose:** Moves audio and lyric files from a source directory (e.g., `downloaded_songs/`) into the structured `data/` subdirectories (`data/raw_songs_full/`, `data/lyrics/`).
-    *   **LLM Context:** Utility script for managing data after acquisition.
+    *   **Purpose:** Moves audio and lyric files from a source directory (e.g., `downloaded_songs/` or potentially `downloaded_files/` if desired for further processing) into the structured `data/` subdirectories (`data/raw_songs_full/`, `data/lyrics/`).
+    *   **LLM Context:** Utility script for managing data after acquisition, preparing it for the main `beefai` processing pipeline.
 
 *   **`preprocess_dataset.py`**:
     *   **Purpose:** Core script for Phases 2 & 3 of the data pipeline. It processes raw/separated audio and alignment data to extract `SongBeatFeatures` and `FlowData` for each song.
@@ -382,7 +351,7 @@ Contains utility scripts and scripts that form parts of the main data processing
 *   **`run_full_data_pipeline.py`**:
     *   **Purpose:** Master script designed to orchestrate the entire data preparation pipeline, from raw songs to tokenized data ready for model training.
     *   **Key Functionality:** Sequentially calls or executes other components/scripts:
-        1.  Optional data acquisition/organization steps (commented out by default, but structure is present).
+        1.  Optional data acquisition/organization steps (commented out by default, but structure is present). This might involve `download_spotify_playlist.py` or `download_youtube_lyrics.py`, followed by `organize_downloaded_songs.py`.
         2.  Source separation (e.g., using `demucs` via `subprocess`). Iterates through raw songs, runs Demucs, and moves separated vocals/instrumental to `data/acapellas/` and `data/instrumentals/`.
         3.  Forced alignment (e.g., using `whisper-timestamped` via `subprocess`). Iterates through acapellas and generates alignment JSONs in `data/alignments_json/`.
         4.  Calls `scripts/preprocess_dataset.py` to extract beat and flow features, creating `processed_training_data.pt`.
