@@ -1,4 +1,3 @@
-# beefai/evaluation/rhythm_visualizer.py
 import torch
 import torch.nn.functional as F
 import os
@@ -23,7 +22,7 @@ from beefai.utils.data_types import BeatInfo, FlowData, FlowDatum, BarBeatFeatur
 DEFAULT_MODEL_CONFIG_PATH = "lite_model_training/model_config_full.yaml"
 DEFAULT_TOKENIZER_CONFIG_PATH = "beefai/flow_model/flow_tokenizer_config_v2.json" 
 DEFAULT_CHECKPOINT_PATH = "data/checkpoints/flow_model_full/full_final_model.pt" 
-DEFAULT_INSTRUMENTAL_PATH = "data/instrumentals/blackertheberry2.mp3" 
+DEFAULT_INSTRUMENTAL_PATH = "data/instrumentals/HiiiPower.wav" 
 DEFAULT_INSTRUMENTAL_OFFSET_SEC = None 
 DEFAULT_INSTRUMENTAL_DURATION_SEC = None 
 
@@ -304,10 +303,13 @@ def _generate_flow_core(
     tokenizer_config_path: str,
     context_bar_idx_start: int, 
     output_name_suffix: str,
-    force_offset_on_beat_one_bias: Optional[float] = None, # New parameter
-    energy_bias_params: Optional[Dict[str, float]] = None, # New param for energy {syl_count_bias: val, short_syl_dur_bias: val}
-    temperature: float = 0.8, # NEW PARAMETER
-    top_k: int = 0,           # NEW PARAMETER (0 for no top_k filtering)
+    energy_bias_params: Optional[Dict[str, float]] = None, 
+    temperature: float = 0.8, 
+    top_k: int = 0,
+    max_lines_per_bar_heuristic: int = 3,
+    rhythmic_offset_bias_strength: Optional[float] = None,
+    rhythmic_line_duration_bias_strength: Optional[float] = None,
+    rhythmic_syllable_duration_bias_strength: Optional[float] = None
 ) -> Tuple[Optional[FlowData], Optional[FlowTokenizer], Optional[FlowGPTConfig]]:
     
     if not os.path.exists(tokenizer_config_path):
@@ -376,27 +378,21 @@ def _generate_flow_core(
     current_token_ids_list.append(line_start_tok); current_segment_ids_list.append(seg_id); current_intra_pos_ids_list.append(intra_id)
 
     max_song_bars = len(all_song_beat_features) if all_song_beat_features else context_bar_idx_start + 16 
-    avg_tokens_per_bar_features = 25 
-    avg_lines_per_bar = 2 
-    avg_tokens_per_flow_line = 20 
-    max_total_tokens_safety_net = gpt_config.block_size + (avg_tokens_per_bar_features + avg_lines_per_bar * avg_tokens_per_flow_line) * (max_song_bars + 5)
+    max_total_tokens_safety_net = gpt_config.block_size + (25 + 2 * 20) * (max_song_bars + 5)
 
-    generated_flow_tokens_for_song: List[int] = [] 
-    current_bar_being_generated_flow_for = context_bar_idx_start 
+    generated_flow_tokens_for_song: List[int] = [tokenizer.line_start_token_id] 
     
     full_song_context_token_ids = list(current_token_ids_list) 
     full_song_context_segment_ids = list(current_segment_ids_list)
     full_song_context_intra_pos_ids = list(current_intra_pos_ids_list)
-    generated_flow_tokens_for_song.append(tokenizer.line_start_token_id)
-
-    # State for logit biasing
-    # Phase: None, "EXPECTING_SYLLABLES_COUNT", "EXPECTING_OFFSET_BIN", "EXPECTING_DURATION_BIN",
-    #        "EXPECTING_SYLLABLE_START", "EXPECTING_SYLLABLE_DURATION", "EXPECTING_SYLLABLE_STRESS"
-    current_gen_phase = "EXPECTING_SYLLABLES_COUNT" # Since prompt ends with LINE_START
-
+    
+    current_bar_being_generated_flow_for = context_bar_idx_start 
+    current_gen_phase = "EXPECTING_SYLLABLES_COUNT" 
+    target_syllables_for_current_line = -1
+    syllables_generated_for_current_line = 0
+    lines_generated_for_current_bar = 1 
 
     print(f"Generating flow for song, starting from bar {current_bar_being_generated_flow_for}, up to ~{max_song_bars} bars or {max_total_tokens_safety_net} tokens...")
-    # print(f"Initial context (last 50 tokens): {[tokenizer.id_to_token.get(tid, str(tid)) for tid in full_song_context_token_ids[-50:]]}")
 
     for step_count in range(max_total_tokens_safety_net - len(full_song_context_token_ids)):
         idx_cond = torch.tensor([full_song_context_token_ids[-gpt_config.block_size:]], dtype=torch.long, device=DEVICE)
@@ -406,56 +402,106 @@ def _generate_flow_core(
         with torch.no_grad():
             logits, _ = model(idx_cond, segment_ids=seg_ids_cond, intra_line_pos_ids=intra_pos_ids_cond)
         
-        # Logit manipulation BEFORE temperature and softmax
-        if force_offset_on_beat_one_bias is not None and current_gen_phase == "EXPECTING_OFFSET_BIN":
-            offset_bin_0_id = tokenizer.token_to_id.get("[OFFSET_BIN_0]")
-            if offset_bin_0_id is not None:
-                # print(f"DEBUG: Biasing [OFFSET_BIN_0] (ID: {offset_bin_0_id}) with {force_offset_on_beat_one_bias}")
-                logits[0, -1, offset_bin_0_id] += force_offset_on_beat_one_bias
-        
+        logit_slice_for_masking = logits[0, -1, :]
+
         if energy_bias_params:
             if current_gen_phase == "EXPECTING_SYLLABLES_COUNT" and "syl_count_bias" in energy_bias_params:
-                # Bias towards higher syllable counts (e.g., 12 to max_syllables)
                 for i in range(max(0,tokenizer.max_syllables // 2), tokenizer.max_syllables + 1): 
                     syl_token_id = tokenizer.token_to_id.get(f"[SYLLABLES_{i}]")
                     if syl_token_id is not None:
-                        logits[0, -1, syl_token_id] += energy_bias_params["syl_count_bias"]
+                        logit_slice_for_masking[syl_token_id] += energy_bias_params["syl_count_bias"]
             
-            if current_gen_phase == "EXPECTING_SYLLABLE_DURATION" and "short_syl_dur_bias" in energy_bias_params:
-                # Bias towards shorter per-syllable durations (e.g., first third of bins)
+            if current_gen_phase == "EXPECTING_SYLLABLE_DURATION" and "short_syl_dur_bias" in energy_bias_params and rhythmic_syllable_duration_bias_strength is None:
                 for i in range(tokenizer.num_syllable_duration_bins // 3): 
                     syl_dur_id = tokenizer.token_to_id.get(f"[SYLLABLE_DURATION_BIN_{i}]")
                     if syl_dur_id is not None:
-                        logits[0, -1, syl_dur_id] += energy_bias_params["short_syl_dur_bias"]
-
-
-        logits = logits[:, -1, :] / temperature 
+                        logit_slice_for_masking[syl_dur_id] += energy_bias_params["short_syl_dur_bias"]
         
-        # Corrected top_k application
-        if top_k is not None and top_k > 0: # Check if it's a valid number
-            v, _ = torch.topk(logits, min(top_k, logits.size(-1)))
-            logits[logits < v[:, [-1]]] = -float('Inf')
+        if rhythmic_offset_bias_strength is not None and current_gen_phase == "EXPECTING_OFFSET_BIN":
+            strong_offset_beat_multiples = [0.0, 0.5, 1.0, 1.5, 2.0, 2.5, 3.0, 3.5] 
+            for i in range(tokenizer.num_offset_bins):
+                offset_token_id = tokenizer.token_to_id.get(f"[OFFSET_BIN_{i}]")
+                if offset_token_id is not None:
+                    dequantized_offset = tokenizer._dequantize_flow_value(i, tokenizer.flow_offset_max_beats, tokenizer.num_offset_bins)
+                    for strong_offset in strong_offset_beat_multiples:
+                        if abs(dequantized_offset - strong_offset) < 0.1: 
+                            logit_slice_for_masking[offset_token_id] += rhythmic_offset_bias_strength
+                            break
         
-        probs = F.softmax(logits, dim=-1)
-        next_token_id = torch.multinomial(probs, num_samples=1).item()
+        if rhythmic_line_duration_bias_strength is not None and current_gen_phase == "EXPECTING_DURATION_BIN":
+            rhythmic_line_dur_multiples = [0.5, 1.0, 1.5, 2.0, 3.0, 4.0] 
+            for i in range(tokenizer.num_duration_bins):
+                dur_token_id = tokenizer.token_to_id.get(f"[DURATION_BIN_{i}]")
+                if dur_token_id is not None:
+                    dequantized_dur = tokenizer._dequantize_flow_value(i, tokenizer.flow_duration_max_beats, tokenizer.num_duration_bins)
+                    if dequantized_dur < 0.1: continue 
+                    for rhythmic_dur in rhythmic_line_dur_multiples:
+                        if abs(dequantized_dur - rhythmic_dur) < 0.2: 
+                            logit_slice_for_masking[dur_token_id] += rhythmic_line_duration_bias_strength
+                            break
+
+        if rhythmic_syllable_duration_bias_strength is not None and current_gen_phase == "EXPECTING_SYLLABLE_DURATION":
+            target_syl_dur_beats = [0.125, 0.25, 0.375, 0.5, 0.75, 1.0] 
+            for i in range(tokenizer.num_syllable_duration_bins):
+                syl_dur_token_id = tokenizer.token_to_id.get(f"[SYLLABLE_DURATION_BIN_{i}]")
+                if syl_dur_token_id is not None:
+                    dequantized_syl_dur = tokenizer.dequantize_syllable_duration_bin(i)
+                    for target_dur in target_syl_dur_beats:
+                        if abs(dequantized_syl_dur - target_dur) < 0.05: 
+                            logit_slice_for_masking[syl_dur_token_id] += rhythmic_syllable_duration_bias_strength
+                            break
+        
+        grammar_mask = torch.ones_like(logit_slice_for_masking, dtype=torch.bool, device=DEVICE) 
+        allowed_ids: List[int] = []
+        if current_gen_phase == "EXPECTING_SYLLABLES_COUNT":
+            allowed_ids = tokenizer.get_token_ids_for_category("[SYLLABLES_")
+        elif current_gen_phase == "EXPECTING_OFFSET_BIN":
+            allowed_ids = tokenizer.get_token_ids_for_category("[OFFSET_BIN_")
+        elif current_gen_phase == "EXPECTING_DURATION_BIN":
+            allowed_ids = tokenizer.get_token_ids_for_category("[DURATION_BIN_")
+        elif current_gen_phase == "EXPECTING_SYLLABLE_START":
+            if target_syllables_for_current_line > 0 and \
+               syllables_generated_for_current_line < target_syllables_for_current_line:
+                allowed_ids = tokenizer.get_token_ids_for_category("[SYLLABLE_STARTS_SUBDIV_")
+            else: 
+                allowed_ids = [tokenizer.end_syllable_sequence_token_id]
+        elif current_gen_phase == "EXPECTING_SYLLABLE_DURATION":
+            allowed_ids = tokenizer.get_token_ids_for_category("[SYLLABLE_DURATION_BIN_")
+        elif current_gen_phase == "EXPECTING_SYLLABLE_STRESS":
+            allowed_ids = tokenizer.get_token_ids_for_category("[SYLLABLE_STRESS_")
+        elif current_gen_phase == "EXPECTING_END_SYLLABLE_SEQUENCE" or \
+             current_gen_phase == "EXPECTING_END_SYLLABLE_SEQUENCE_DIRECTLY":
+            allowed_ids = [tokenizer.end_syllable_sequence_token_id]
+        elif current_gen_phase == "EXPECTING_LINE_START_OR_BAR_START":
+            allowed_ids = [tokenizer.line_start_token_id, tokenizer.bar_start_token_id]
+            if lines_generated_for_current_bar >= max_lines_per_bar_heuristic:
+                if tokenizer.line_start_token_id in allowed_ids:
+                    logit_slice_for_masking[tokenizer.line_start_token_id] -= 10.0 
+                if tokenizer.bar_start_token_id in allowed_ids: 
+                     logit_slice_for_masking[tokenizer.bar_start_token_id] += 5.0
+        
+        if allowed_ids:
+            grammar_mask[allowed_ids] = False 
+        else: 
+            grammar_mask[tokenizer.eos_token_id] = False
+        
+        logit_slice_for_masking[grammar_mask] = -float('Inf')
+        logits[0, -1, :] = logit_slice_for_masking 
+
+        final_logits = logits[:, -1, :] / temperature 
+        if top_k > 0:
+            v, _ = torch.topk(final_logits, min(top_k, final_logits.size(-1)))
+            final_logits[final_logits < v[:, [-1]]] = -float('Inf')
+        
+        probs = F.softmax(final_logits, dim=-1)
+        if not (torch.isfinite(probs).all()): # FIX: Use torch.isfinite
+            print(f"Warning: Non-finite probabilities encountered at step {step_count}, phase {current_gen_phase}.")
+            print(f"  Logits min/max: {final_logits.min().item()}, {final_logits.max().item()}")
+            next_token_id = tokenizer.eos_token_id 
+        else:
+            next_token_id = torch.multinomial(probs, num_samples=1).item()
+            
         next_token_str = tokenizer.id_to_token.get(next_token_id, f"[UNK_ID:{next_token_id}]")
-
-        # Optional: Log the top K probabilities for the chosen token
-        # top_k_probs, top_k_indices = torch.topk(probs, 5)
-        # print(f"  Step {step_count}: Gen: {next_token_str} (ID: {next_token_id}). Top 5 Probs: " + 
-        #       ", ".join([f"{tokenizer.id_to_token.get(idx.item())}({p.item():.3f})" for idx, p in zip(top_k_indices[0], top_k_probs[0])]))
-
-        # Update generation phase based on the token *just generated*
-        if next_token_str.startswith("[SYLLABLES_"): current_gen_phase = "EXPECTING_OFFSET_BIN"
-        elif next_token_str.startswith("[OFFSET_BIN_"): current_gen_phase = "EXPECTING_DURATION_BIN"
-        elif next_token_str.startswith("[DURATION_BIN_"): current_gen_phase = "EXPECTING_SYLLABLE_START"
-        elif next_token_str.startswith("[SYLLABLE_STARTS_SUBDIV_"): current_gen_phase = "EXPECTING_SYLLABLE_DURATION"
-        elif next_token_str.startswith("[SYLLABLE_DURATION_BIN_"): current_gen_phase = "EXPECTING_SYLLABLE_STRESS"
-        elif next_token_str.startswith("[SYLLABLE_STRESS_"): current_gen_phase = "EXPECTING_SYLLABLE_START" # Ready for next triplet or END
-        elif next_token_id == tokenizer.end_syllable_sequence_token_id: current_gen_phase = "EXPECTING_LINE_START_OR_BAR_START" # Line ended
-        elif next_token_id == tokenizer.line_start_token_id: current_gen_phase = "EXPECTING_SYLLABLES_COUNT"
-        elif next_token_id == tokenizer.bar_start_token_id: current_gen_phase = "EXPECTING_BEAT_FEATURES_THEN_LINE_START" # (This phase is handled by guidance logic below)
-
 
         next_seg_id, next_intra_pos_id = get_next_context_ids_for_token(
             full_song_context_token_ids, next_token_id, tokenizer, 
@@ -472,6 +518,8 @@ def _generate_flow_core(
         
         if next_token_id == tokenizer.bar_start_token_id:
             current_bar_being_generated_flow_for += 1 
+            lines_generated_for_current_bar = 0 
+
             if current_bar_being_generated_flow_for >= max_song_bars:
                 print(f"  Reached max song bars ({max_song_bars}). Stopping generation.")
                 if generated_flow_tokens_for_song[-1] == tokenizer.bar_start_token_id: generated_flow_tokens_for_song.pop()
@@ -484,8 +532,8 @@ def _generate_flow_core(
                 if generated_flow_tokens_for_song[-1] != tokenizer.eos_token_id: generated_flow_tokens_for_song.append(tokenizer.eos_token_id)
                 break
             
-            bar_tokens_for_new_bar_guidance = tokenizer.encode_bar_features(next_bar_features)[1:] 
-            for tok_id in bar_tokens_for_new_bar_guidance:
+            bar_tokens_for_guidance = tokenizer.encode_bar_features(next_bar_features)[1:] 
+            for tok_id in bar_tokens_for_guidance:
                 seg_id, intra_id = get_next_context_ids_for_token(full_song_context_token_ids, tok_id, tokenizer, gpt_config.max_segment_types, gpt_config.max_intra_line_positions)
                 full_song_context_token_ids.append(tok_id); full_song_context_segment_ids.append(seg_id); full_song_context_intra_pos_ids.append(intra_id)
             
@@ -496,10 +544,53 @@ def _generate_flow_core(
             line_start_tok_guidance = tokenizer.line_start_token_id
             seg_id, intra_id = get_next_context_ids_for_token(full_song_context_token_ids, line_start_tok_guidance, tokenizer, gpt_config.max_segment_types, gpt_config.max_intra_line_positions)
             full_song_context_token_ids.append(line_start_tok_guidance); full_song_context_segment_ids.append(seg_id); full_song_context_intra_pos_ids.append(intra_id)
-            
-            generated_flow_tokens_for_song.append(line_start_tok_guidance)
-            current_gen_phase = "EXPECTING_SYLLABLES_COUNT" # Update phase after guidance
+            generated_flow_tokens_for_song.append(line_start_tok_guidance) 
 
+            current_gen_phase = "EXPECTING_SYLLABLES_COUNT"
+            lines_generated_for_current_bar = 1 
+            syllables_generated_for_current_line = 0
+            target_syllables_for_current_line = -1
+        
+        elif next_token_id == tokenizer.line_start_token_id:
+            lines_generated_for_current_bar += 1
+            syllables_generated_for_current_line = 0
+            target_syllables_for_current_line = -1
+            current_gen_phase = "EXPECTING_SYLLABLES_COUNT"
+
+        elif next_token_str.startswith("[SYLLABLES_"):
+            val = tokenizer.get_value_from_special_token(next_token_str)
+            target_syllables_for_current_line = val if val is not None else 0
+            current_gen_phase = "EXPECTING_OFFSET_BIN"
+
+        elif next_token_str.startswith("[OFFSET_BIN_"):
+            current_gen_phase = "EXPECTING_DURATION_BIN"
+
+        elif next_token_str.startswith("[DURATION_BIN_"):
+            if target_syllables_for_current_line == 0:
+                current_gen_phase = "EXPECTING_END_SYLLABLE_SEQUENCE_DIRECTLY"
+            elif target_syllables_for_current_line > 0 :
+                current_gen_phase = "EXPECTING_SYLLABLE_START"
+            else: 
+                current_gen_phase = "EXPECTING_END_SYLLABLE_SEQUENCE_DIRECTLY" 
+                
+        elif next_token_str.startswith("[SYLLABLE_STARTS_SUBDIV_"):
+            current_gen_phase = "EXPECTING_SYLLABLE_DURATION"
+
+        elif next_token_str.startswith("[SYLLABLE_DURATION_BIN_"):
+            current_gen_phase = "EXPECTING_SYLLABLE_STRESS"
+
+        elif next_token_str.startswith("[SYLLABLE_STRESS_"):
+            syllables_generated_for_current_line += 1
+            if syllables_generated_for_current_line >= target_syllables_for_current_line:
+                current_gen_phase = "EXPECTING_END_SYLLABLE_SEQUENCE"
+            else:
+                current_gen_phase = "EXPECTING_SYLLABLE_START"
+
+        elif next_token_id == tokenizer.end_syllable_sequence_token_id:
+            current_gen_phase = "EXPECTING_LINE_START_OR_BAR_START"
+            syllables_generated_for_current_line = 0 
+            target_syllables_for_current_line = -1
+    
     print("\n--- Raw Generated Flow Tokens (Full Song) ---")
     decoded_tokens_for_print = [tokenizer.id_to_token.get(token_id, str(token_id)) for token_id in generated_flow_tokens_for_song]
     tokens_per_line_log = 15
@@ -523,26 +614,26 @@ def _generate_flow_core(
             idx_in_gen_flow_tokens += 1 
             if idx_in_gen_flow_tokens < len(generated_flow_tokens_for_song) and \
                generated_flow_tokens_for_song[idx_in_gen_flow_tokens] == tokenizer.line_start_token_id:
-                current_token_id = generated_flow_tokens_for_song[idx_in_gen_flow_tokens]
-            else:
+                current_token_id = generated_flow_tokens_for_song[idx_in_gen_flow_tokens] 
+            else: 
                 continue 
 
         if current_token_id != tokenizer.line_start_token_id:
-            idx_in_gen_flow_tokens += 1
+            idx_in_gen_flow_tokens += 1 
             continue
 
         tokens_for_this_line_attempt = []
         temp_line_parser_idx = idx_in_gen_flow_tokens 
         
         while temp_line_parser_idx < len(generated_flow_tokens_for_song):
-            token_id = generated_flow_tokens_for_this_line_attempt[temp_line_parser_idx]
+            token_id = generated_flow_tokens_for_song[temp_line_parser_idx] 
             tokens_for_this_line_attempt.append(token_id)
             if token_id == tokenizer.end_syllable_sequence_token_id:
                 break
             if token_id in [tokenizer.eos_token_id, tokenizer.bar_start_token_id] and \
                len(tokens_for_this_line_attempt) > 1: 
                 tokens_for_this_line_attempt.pop() 
-                temp_line_parser_idx-=1 
+                temp_line_parser_idx -=1 
                 break
             temp_line_parser_idx += 1
         
@@ -563,7 +654,7 @@ def save_flow_data_to_json(flow_data: FlowData, beat_info: BeatInfo, output_path
         return
 
     bpm = beat_info.get("bpm", 120.0)
-    output_data_dict = { # Changed to dict for direct JSON dump
+    output_data_dict = { 
         "beat_info": {
             "bpm": bpm,
             "beats_per_bar": beat_info.get("beats_per_bar", 4),
@@ -574,11 +665,11 @@ def save_flow_data_to_json(flow_data: FlowData, beat_info: BeatInfo, output_path
     for fd in flow_data:
         line_data = dict(fd) 
         line_data["approx_line_duration_sec"] = round(fd["duration_beats"] * (60.0/bpm), 2)
-        output_data_dict["flow_lines"].append(line_data) # Use append for list
+        output_data_dict["flow_lines"].append(line_data) 
         
     try:
         with open(output_path, 'w') as f:
-            json.dump(output_data_dict, f, indent=2) # Dump the dictionary
+            json.dump(output_data_dict, f, indent=2) 
         print(f"Generated flow data saved to: {output_path}")
     except Exception as e:
         print(f"Error saving flow data to JSON: {e}")
@@ -594,12 +685,14 @@ def visualize_flow_rhythm(
     num_prompt_bars: int = 2, 
     output_filename_prefix: str = "flow_vis_audio",
     output_format: str = "wav",
-    generation_temperature: float = 0.8, # New parameter
-    generation_top_k: int = 0,           # New parameter (0 for no top_k)
-    # New parameters for controlling generation biases
-    force_offset_on_beat_one_bias_strength: Optional[float] = None, # e.g., 2.0
-    energy_syl_count_bias_strength: Optional[float] = None,      # e.g., 1.0
-    energy_short_syl_dur_bias_strength: Optional[float] = None   # e.g., 0.5
+    generation_temperature: float = 0.8, 
+    generation_top_k: int = 0,           
+    energy_syl_count_bias_strength: Optional[float] = None,      
+    energy_short_syl_dur_bias_strength: Optional[float] = None,
+    max_lines_per_bar_gen_heuristic: int = 3,
+    param_rhythmic_offset_bias: Optional[float] = None,
+    param_rhythmic_line_duration_bias: Optional[float] = None,
+    param_rhythmic_syllable_duration_bias: Optional[float] = None
 ):
     print(f"--- Visualizing Flow Rhythm (Full Song Generation) ---")
     print(f"Using device: {DEVICE}")
@@ -607,12 +700,24 @@ def visualize_flow_rhythm(
     print(f"Instrumental: {instrumental_audio_path}" + 
           (f" (Offset: {instrumental_offset_sec}s" if instrumental_offset_sec is not None else "") +
           (f", Duration: {instrumental_duration_sec}s" if instrumental_duration_sec is not None else "") + ")")
-    print(f"Generation params: Temperature {generation_temperature}, Top-K {generation_top_k}")
-    if force_offset_on_beat_one_bias_strength:
-        print(f"Applying bias for [OFFSET_BIN_0]: {force_offset_on_beat_one_bias_strength}")
-    if energy_syl_count_bias_strength or energy_short_syl_dur_bias_strength:
-        print(f"Applying energy biases: SylCount {energy_syl_count_bias_strength}, ShortSylDur {energy_short_syl_dur_bias_strength}")
-
+    print(f"Generation params: Temp {generation_temperature}, Top-K {generation_top_k}, MaxLinesHeuristic: {max_lines_per_bar_gen_heuristic}")
+    
+    energy_bias_params_dict: Optional[Dict[str, float]] = None
+    if energy_syl_count_bias_strength is not None or energy_short_syl_dur_bias_strength is not None:
+        energy_bias_params_dict = {}
+        if energy_syl_count_bias_strength is not None:
+            energy_bias_params_dict["syl_count_bias"] = energy_syl_count_bias_strength
+            print(f"Energy bias: SylCount {energy_syl_count_bias_strength}")
+        if energy_short_syl_dur_bias_strength is not None:
+            energy_bias_params_dict["short_syl_dur_bias"] = energy_short_syl_dur_bias_strength
+            print(f"Energy bias: ShortSylDur {energy_short_syl_dur_bias_strength}")
+    
+    if param_rhythmic_offset_bias is not None:
+        print(f"Rhythmic bias: OffsetStrength {param_rhythmic_offset_bias}")
+    if param_rhythmic_line_duration_bias is not None:
+        print(f"Rhythmic bias: LineDurStrength {param_rhythmic_line_duration_bias}")
+    if param_rhythmic_syllable_duration_bias is not None:
+        print(f"Rhythmic bias: SylDurStrength {param_rhythmic_syllable_duration_bias}")
 
     audio_processor = AudioProcessor()
     beat_feature_extractor = BeatFeatureExtractor() 
@@ -660,15 +765,6 @@ def visualize_flow_rhythm(
     prompt_bar_features_for_gen = all_beat_features_for_segment[:num_prompt_bars]
     context_bar_idx_start_for_gen = prompt_bar_features_for_gen[-1]["bar_index"] + 1 if prompt_bar_features_for_gen else 0
 
-    energy_bias_params_dict: Optional[Dict[str, float]] = None
-    if energy_syl_count_bias_strength is not None or energy_short_syl_dur_bias_strength is not None:
-        energy_bias_params_dict = {}
-        if energy_syl_count_bias_strength is not None:
-            energy_bias_params_dict["syl_count_bias"] = energy_syl_count_bias_strength
-        if energy_short_syl_dur_bias_strength is not None:
-            energy_bias_params_dict["short_syl_dur_bias"] = energy_short_syl_dur_bias_strength
-
-
     decoded_flow_data, tokenizer_instance, _ = _generate_flow_core(
         prompt_bar_features=prompt_bar_features_for_gen,
         all_song_beat_features=all_beat_features_for_segment, 
@@ -677,10 +773,13 @@ def visualize_flow_rhythm(
         tokenizer_config_path=tokenizer_config_path,
         context_bar_idx_start=context_bar_idx_start_for_gen,
         output_name_suffix=f"from_{os.path.splitext(os.path.basename(instrumental_audio_path))[0]}",
-        force_offset_on_beat_one_bias=force_offset_on_beat_one_bias_strength,
         energy_bias_params=energy_bias_params_dict,
-        temperature=generation_temperature, # Pass new parameter
-        top_k=generation_top_k,           # Pass new parameter
+        temperature=generation_temperature, 
+        top_k=generation_top_k,
+        max_lines_per_bar_heuristic=max_lines_per_bar_gen_heuristic,
+        rhythmic_offset_bias_strength=param_rhythmic_offset_bias,
+        rhythmic_line_duration_bias_strength=param_rhythmic_line_duration_bias,
+        rhythmic_syllable_duration_bias_strength=param_rhythmic_syllable_duration_bias
     )
 
     if not tokenizer_instance: 
@@ -740,24 +839,18 @@ if __name__ == "__main__":
     
     main_instrumental_audio = DEFAULT_INSTRUMENTAL_PATH
     main_instrumental_offset = DEFAULT_INSTRUMENTAL_OFFSET_SEC 
-    main_instrumental_duration = DEFAULT_INSTRUMENTAL_DURATION_SEC
+    main_instrumental_duration = DEFAULT_INSTRUMENTAL_DURATION_SEC 
 
-    # --- Parameters for controlling generation biases ---
-    # Set to a float (e.g., 1.0 to 3.0) to enable, or None to disable
-    param_force_offset_on_beat_one = 2.0  # Example: strong bias for beat 1
-    param_energy_syl_count = 1.0         # Example: bias for more syllables
-    param_energy_short_syl_dur = 0.75    # Example: bias for shorter per-syllable durations
+    param_energy_syl_count = 0.5      
+    param_energy_short_syl_dur = None 
 
-    # To disable a specific bias, set its strength to None:
-    # param_force_offset_on_beat_one = None
-    # param_energy_syl_count = None
-    # param_energy_short_syl_dur = None
-    # --- End Bias Parameters ---
-
-    # --- Parameters for controlling generation sampling ---
-    param_generation_temp = 0.8  # Default or user choice
-    param_generation_top_k = 0   # Default to 0 (no top-k filtering) or e.g. 50
-    # --- End Sampling Parameters ---
+    param_rhythmic_offset = 1.5                 
+    param_rhythmic_line_duration = 1.0          
+    param_rhythmic_syllable_duration = 1.2      
+    
+    param_generation_temp = 0.75 
+    param_generation_top_k = 40   
+    param_max_lines_heuristic = 2 
 
     if not os.path.exists(main_checkpoint_path):
         print(f"ERROR: Default model checkpoint '{main_checkpoint_path}' not found.")
@@ -779,8 +872,11 @@ if __name__ == "__main__":
             num_prompt_bars=2,
             generation_temperature=param_generation_temp,
             generation_top_k=param_generation_top_k,
-            force_offset_on_beat_one_bias_strength=param_force_offset_on_beat_one,
             energy_syl_count_bias_strength=param_energy_syl_count,
-            energy_short_syl_dur_bias_strength=param_energy_short_syl_dur
+            energy_short_syl_dur_bias_strength=param_energy_short_syl_dur,
+            max_lines_per_bar_gen_heuristic=param_max_lines_heuristic,
+            param_rhythmic_offset_bias=param_rhythmic_offset,
+            param_rhythmic_line_duration_bias=param_rhythmic_line_duration,
+            param_rhythmic_syllable_duration_bias=param_rhythmic_syllable_duration
         )
     print("-" * 50)

@@ -411,8 +411,8 @@ if __name__ == "__main__":
     parser.add_argument("--force_reprocess", action="store_true", help="Force reprocessing of features, ignore all caches.")
     
     default_num_workers = os.cpu_count()
-    if default_num_workers is None: # os.cpu_count() can return None
-        default_num_workers = 4 # Fallback if cpu_count is not determinable
+    if default_num_workers is None:
+        default_num_workers = 4
     else:
         # Leave one core for system stability on multi-core, or use all for <=2 cores.
         default_num_workers = max(1, default_num_workers - 1 if default_num_workers > 2 else default_num_workers) 
