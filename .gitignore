@@ -8,6 +8,8 @@ env/
 venv/
 .venv/
 
+
+
 # Distribution / packaging
 .Python
 build/
@@ -96,6 +98,7 @@ ehthumbs.db
 Thumbs.db
 
 # Project specific
+data/*
 downloaded_songs/
 downloaded_lyrics_txt/ # If this was ever used
 downloaded_files/ # New directory for spotify downloader
@@ -117,3 +120,5 @@ data_tokenized_full/
 output
 arpa/
 downloaded_files/
+~syncthing~*
+*.tmp
