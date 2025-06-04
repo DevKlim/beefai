@@ -4,6 +4,8 @@ import numpy as np
 import os
 import sys
 from typing import List, Dict, Tuple, Optional, Any
+import concurrent.futures
+import time # Added for timing in __main__
 
 # Adjust import path if beefai is not directly in PYTHONPATH
 # sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '../..')))
@@ -13,15 +15,19 @@ from beefai.utils.data_types import BeatInfo, BarBeatFeatures, SongBeatFeatures
 LOG_PREFIX_BFE = "[BFE]"
 
 class BeatFeatureExtractor:
-    def __init__(self, sample_rate: int = 44100, subdivisions_per_bar: int = 16):
+    def __init__(self, 
+                 sample_rate: int = 44100, 
+                 subdivisions_per_bar: int = 16,
+                 max_workers_onset: int = 4,      # Max workers for parallel onset detection
+                 max_workers_stem_load: int = 2): # Max workers for parallel stem loading
         self.sample_rate = sample_rate
         self.subdivisions_per_bar = subdivisions_per_bar
-        # print("BeatFeatureExtractor initialized. NOTE: Drum/Bass transcription is currently a STUB.")
-        # print("It will simulate features using librosa.onset.onset_detect on relevant stems or full mix.")
+        self.max_workers_onset = max(1, max_workers_onset) 
+        self.max_workers_stem_load = max(1, max_workers_stem_load)
 
     def _load_stem(self, stems_dir: str, stem_filename: str, 
                    offset_sec: Optional[float] = None, 
-                   duration_sec: Optional[float] = None) -> Optional[np.ndarray]: # Added offset/duration
+                   duration_sec: Optional[float] = None) -> Optional[np.ndarray]:
         """Loads a specific stem if it exists, with offset and duration."""
         stem_path = os.path.join(stems_dir, stem_filename)
         if os.path.exists(stem_path):
@@ -29,12 +35,9 @@ class BeatFeatureExtractor:
                 y, sr = librosa.load(stem_path, sr=self.sample_rate, mono=True,
                                      offset=offset_sec if offset_sec is not None else 0.0,
                                      duration=duration_sec)
-                # print(f"{LOG_PREFIX_BFE}   Successfully loaded stem: {stem_filename} from {stems_dir}", flush=True)
                 return y
             except Exception as e:
                 print(f"{LOG_PREFIX_BFE}   Error loading stem {stem_path}: {e}", flush=True)
-        # else:
-            # print(f"{LOG_PREFIX_BFE}   Warning: Stem file {stem_path} not found.", flush=True)
         return None
 
     def _get_onsets_for_instrument(self, 
@@ -45,33 +48,21 @@ class BeatFeatureExtractor:
         
         y_target = y_instrument if y_instrument is not None and y_instrument.size > 0 else y_full_mix_mono
         
-        hop_length = 512 
-        backtrack = True 
-        
-        if y_target is None or y_target.size == 0: # Add check for empty target array
-            # print(f"{LOG_PREFIX_BFE} Warning: Empty audio target for {instrument_name} onsets. Returning no onsets.")
+        if y_target is None or y_target.size == 0: 
             return np.array([])
 
-        if instrument_name == "kick":
+        # Define onset detection parameters for each instrument
+        onset_params = {
+            "kick":    {"pre_max": 20, "post_max": 20, "pre_avg": 100, "post_avg": 100, "delta": 0.1,  "wait": 1, "hop_length": 512},
+            "snare":   {"pre_max": 15, "post_max": 15, "pre_avg": 80,  "post_avg": 80,  "delta": 0.08, "wait": 1, "hop_length": 512},
+            "hihat":   {"pre_max": 5,  "post_max": 5,  "pre_avg": 20,  "post_avg": 20,  "delta": 0.03, "wait": 0, "hop_length": 512 // 2},
+            "bass":    {"pre_max": 25, "post_max": 25, "pre_avg": 120, "post_avg": 120, "delta": 0.15, "wait": 1, "hop_length": 512},
+        }
+        
+        params = onset_params.get(instrument_name)
+        if params:
             onsets = librosa.onset.onset_detect(y=y_target, sr=self.sample_rate, units='time', 
-                                                hop_length=hop_length, backtrack=backtrack,
-                                                pre_max=20, post_max=20, pre_avg=100, post_avg=100, 
-                                                delta=0.1, wait=1)
-        elif instrument_name == "snare":
-            onsets = librosa.onset.onset_detect(y=y_target, sr=self.sample_rate, units='time',
-                                                hop_length=hop_length, backtrack=backtrack,
-                                                pre_max=15, post_max=15, pre_avg=80, post_avg=80,
-                                                delta=0.08, wait=1)
-        elif instrument_name == "hihat":
-            onsets = librosa.onset.onset_detect(y=y_target, sr=self.sample_rate, units='time', 
-                                                hop_length=hop_length//2, backtrack=backtrack, 
-                                                pre_max=5, post_max=5, pre_avg=20, post_avg=20, 
-                                                delta=0.03, wait=0) 
-        elif instrument_name == "bass":
-            onsets = librosa.onset.onset_detect(y=y_target, sr=self.sample_rate, units='time', 
-                                                hop_length=hop_length, backtrack=backtrack,
-                                                pre_max=25, post_max=25, pre_avg=120, post_avg=120,
-                                                delta=0.15, wait=1)
+                                                backtrack=True, **params)
         else:
             onsets = np.array([]) 
 
@@ -102,8 +93,8 @@ class BeatFeatureExtractor:
 
     def extract_features_for_song(self, audio_path: str, 
                                   stems_input_dir: Optional[str] = None,
-                                  audio_offset_sec: Optional[float] = None, # New argument
-                                  audio_duration_sec: Optional[float] = None # New argument
+                                  audio_offset_sec: Optional[float] = None,
+                                  audio_duration_sec: Optional[float] = None
                                  ) -> SongBeatFeatures:
         """
         Extracts beat features for an entire song (or a segment of it).
@@ -160,26 +151,43 @@ class BeatFeatureExtractor:
 
         if downbeat_times_sec_in_segment.size == 0: 
             if beat_times_sec.size > 0:
-                # print(f"{LOG_PREFIX_BFE} [{song_basename}] Warning: No downbeats explicitly found in segment, using first beat as start of first bar.", flush=True)
                 downbeat_times_sec_in_segment = np.array([beat_times_sec[0]])
             else: # Should be caught by earlier check, but for safety
                 print(f"{LOG_PREFIX_BFE} [{song_basename}] Critical Warning: No beats or downbeats in segment. Returning empty features.", flush=True)
                 return []
-        # print(f"{LOG_PREFIX_BFE} [{song_basename}] Downbeats estimated in segment: {len(downbeat_times_sec_in_segment)}", flush=True)
 
+        # Parallel Stem Loading
         y_drums_stem: Optional[np.ndarray] = None
         y_bass_stem: Optional[np.ndarray] = None
         if stems_input_dir and os.path.isdir(stems_input_dir):
-            # print(f"{LOG_PREFIX_BFE} [{song_basename}] Attempting to load stems from: {stems_input_dir}", flush=True)
-            # When loading stems, also apply the same offset and duration if they are for the full track
-            y_drums_stem = self._load_stem(stems_input_dir, "drums.wav", audio_offset_sec, audio_duration_sec)
-            y_bass_stem = self._load_stem(stems_input_dir, "bass.wav", audio_offset_sec, audio_duration_sec)
-        # else:
-            # print(f"{LOG_PREFIX_BFE} [{song_basename}] No valid stems_input_dir provided. Onset detection will use full mix segment.", flush=True)
+            with concurrent.futures.ThreadPoolExecutor(max_workers=self.max_workers_stem_load) as executor:
+                future_drums = executor.submit(self._load_stem, stems_input_dir, "drums.wav", audio_offset_sec, audio_duration_sec)
+                future_bass = executor.submit(self._load_stem, stems_input_dir, "bass.wav", audio_offset_sec, audio_duration_sec)
+                try:
+                    y_drums_stem = future_drums.result()
+                    y_bass_stem = future_bass.result()
+                except Exception as e_stem_load:
+                    print(f"{LOG_PREFIX_BFE} [{song_basename}] Error during parallel stem loading: {e_stem_load}", flush=True)
+
+        # Parallel Onset Detection for the entire segment
+        with concurrent.futures.ThreadPoolExecutor(max_workers=self.max_workers_onset) as executor:
+            future_kick_onsets = executor.submit(self._get_onsets_for_instrument, y_drums_stem, y_mono, "kick")
+            future_snare_onsets = executor.submit(self._get_onsets_for_instrument, y_drums_stem, y_mono, "snare")
+            future_hihat_onsets = executor.submit(self._get_onsets_for_instrument, y_drums_stem, y_mono, "hihat")
+            future_bass_onsets = executor.submit(self._get_onsets_for_instrument, y_bass_stem, y_mono, "bass")
+            
+            try:
+                kick_onsets_sec = future_kick_onsets.result()
+                snare_onsets_sec = future_snare_onsets.result()
+                hihat_onsets_sec = future_hihat_onsets.result()
+                bass_onsets_sec = future_bass_onsets.result()
+            except Exception as e_onset:
+                 print(f"{LOG_PREFIX_BFE} [{song_basename}] Error during parallel onset detection: {e_onset}", flush=True)
+                 # Fallback to empty onsets if parallel execution fails, to prevent crash
+                 kick_onsets_sec, snare_onsets_sec, hihat_onsets_sec, bass_onsets_sec = np.array([]), np.array([]), np.array([]), np.array([])
 
         song_features: SongBeatFeatures = []
         num_bars_in_segment = len(downbeat_times_sec_in_segment)
-        # print(f"{LOG_PREFIX_BFE} [{song_basename}] Processing {num_bars_in_segment} bars from segment...", flush=True)
 
         for i in range(num_bars_in_segment):
             bar_start_time_in_segment = downbeat_times_sec_in_segment[i]
@@ -200,12 +208,6 @@ class BeatFeatureExtractor:
             if bar_duration <= 1e-6: 
                 continue
             
-            # Onset detection should use times relative to the start of y_mono (the segment)
-            kick_onsets_sec = self._get_onsets_for_instrument(y_drums_stem, y_mono, "kick")
-            snare_onsets_sec = self._get_onsets_for_instrument(y_drums_stem, y_mono, "snare")
-            hihat_onsets_sec = self._get_onsets_for_instrument(y_drums_stem, y_mono, "hihat")
-            bass_onsets_sec = self._get_onsets_for_instrument(y_bass_stem, y_mono, "bass")
-            
             # The bar_index should be continuous, even if processing a segment.
             # If audio_offset_sec is provided, we need to estimate what original bar index this corresponds to.
             # For now, let's keep bar_index 0-indexed for the segment. The calling function
@@ -224,8 +226,6 @@ class BeatFeatureExtractor:
                 "bar_duration_sec": round(bar_duration, 3)
             }
             song_features.append(bar_feat)
-            # if (i + 1) % 10 == 0 or (i + 1) == num_bars_in_segment: 
-                 # print(f"{LOG_PREFIX_BFE} [{song_basename}] Processed bar {i+1}/{num_bars_in_segment} of segment.", flush=True)
         
         print(f"{LOG_PREFIX_BFE} [{song_basename}] Finished feature extraction for segment. Total bars with features: {len(song_features)}.", flush=True)
         return song_features
@@ -235,7 +235,7 @@ if __name__ == "__main__":
     # This __main__ block in BeatFeatureExtractor is for its own testing,
     # not directly called by the rhythm_visualizer.
     # It would need updates to test the offset/duration functionality if desired.
-    import soundfile as sf_dummy # Renamed to avoid conflict with global sf
+    import soundfile as sf_dummy
     
     dummy_data_dir = os.path.join("data", "temp_testing_bfe") 
     dummy_instrumentals_dir = os.path.join(dummy_data_dir, "instrumentals")
@@ -257,16 +257,25 @@ if __name__ == "__main__":
     sf_dummy.write(dummy_instrumental_path_full, dummy_instrumental_audio_full, dummy_sr)
     print(f"Created dummy full instrumental: {dummy_instrumental_path_full}", flush=True)
 
-    extractor = BeatFeatureExtractor(sample_rate=dummy_sr)
+    # Test with default workers
+    extractor = BeatFeatureExtractor(sample_rate=dummy_sr) 
+    # Or test with specific worker counts:
+    # extractor = BeatFeatureExtractor(sample_rate=dummy_sr, max_workers_onset=2, max_workers_stem_load=1)
     
     print("\n--- Test Case 1: Full dummy instrumental ---", flush=True)
+    start_time_full = time.time()
     features_full = extractor.extract_features_for_song(dummy_instrumental_path_full)
+    end_time_full = time.time()
+    print(f"Full extraction time: {end_time_full - start_time_full:.2f}s")
     if features_full: print(f"Extracted {len(features_full)} bars (Full). First bar BPM: {features_full[0]['bpm'] if features_full else 'N/A'}")
 
     print("\n--- Test Case 2: Segment of dummy instrumental (offset 10s, duration 20s) ---", flush=True)
+    start_time_segment = time.time()
     features_segment = extractor.extract_features_for_song(dummy_instrumental_path_full, 
                                                            audio_offset_sec=10.0, 
                                                            audio_duration_sec=20.0)
+    end_time_segment = time.time()
+    print(f"Segment extraction time: {end_time_segment - start_time_segment:.2f}s")
     if features_segment: 
         print(f"Extracted {len(features_segment)} bars (Segment). First bar BPM: {features_segment[0]['bpm'] if features_segment else 'N/A'}")
         if features_segment:

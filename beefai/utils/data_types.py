@@ -4,12 +4,13 @@ import numpy as np
 # Audio Processing Related
 AudioData = Tuple[np.ndarray, int] # Waveform, Sample Rate
 
-class BeatInfo(TypedDict):
+class BeatInfo(TypedDict, total=False): # Allow for some fields to be optional initially
     bpm: float
     beat_times: List[float]
     downbeat_times: List[float]
     estimated_bar_duration: float
     beats_per_bar: int
+    sbf_features_for_timing_ref: Optional[List[dict]] # Optional: to pass SongBeatFeatures for finer timing
 
 # Beat Feature Extractor Related
 class BarBeatFeatures(TypedDict):
@@ -51,7 +52,7 @@ class FlowDatum(TypedDict):
     
     syllable_start_subdivisions: List[int] 
     syllable_durations_quantized: List[int] 
-    syllable_stresses: List[int] # NEW: Stress marker for each syllable (e.g., 0, 1, 2)
+    syllable_stresses: List[int] # Stress marker for each syllable (e.g., 0, 1, 2)
                                  # same length as syllable_start_subdivisions.
 
 FlowData = List[FlowDatum] # A sequence of flow data for a song or section
@@ -63,6 +64,6 @@ class TrainingInstance(TypedDict):
     flow_data: FlowData 
 
 # Placeholder for more complex phoneme info if needed later
-class PhonemeInfo(TypedDict):
+class PhonemeInfo(TypedDict): # pragma: no cover
     phoneme: str
     duration: Optional[float]

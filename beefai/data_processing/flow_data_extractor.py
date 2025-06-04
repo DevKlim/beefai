@@ -4,16 +4,15 @@ import numpy as np
 from typing import List, Dict, Tuple, Optional, Any
 from beefai.utils.data_types import FlowDatum, FlowData, SongBeatFeatures, LyricsData, BarBeatFeatures, WordTiming, SyllableDetail
 from beefai.data_processing.text_processor import TextProcessor
-from beefai.flow_model.tokenizer import FlowTokenizer # Add this import
+from beefai.flow_model.tokenizer import FlowTokenizer
 import os
 import json
 
-DEBUG_FLOW_EXTRACTOR = False # Keep this for user control
-LOG_PREFIX_FDE = "[FDE]" # For new, non-debug logs
+DEBUG_FLOW_EXTRACTOR = False
+LOG_PREFIX_FDE = "[FDE]"
 
 
 def parse_whisper_timestamped_json(json_file_path: str) -> Optional[LyricsData]:
-    # This function already has good DEBUG_FLOW_EXTRACTOR prints.
     if DEBUG_FLOW_EXTRACTOR: print(f"{LOG_PREFIX_FDE} DEBUG: parse_whisper: Attempting to parse {json_file_path}", flush=True)
     if not os.path.exists(json_file_path):
         if DEBUG_FLOW_EXTRACTOR: print(f"{LOG_PREFIX_FDE} DEBUG: parse_whisper: File not found: {json_file_path}", flush=True)
@@ -67,15 +66,14 @@ def parse_whisper_timestamped_json(json_file_path: str) -> Optional[LyricsData]:
 
 class FlowDataExtractor:
     def __init__(self, 
-                 tokenizer: FlowTokenizer, # Add tokenizer instance
+                 tokenizer: FlowTokenizer,
                  sample_rate_for_acapella: int = 44100, 
                  subdivisions_per_bar: int = 16 
                 ): 
-        self.tokenizer = tokenizer # Store tokenizer instance
+        self.tokenizer = tokenizer
         self.sample_rate = sample_rate_for_acapella 
         self.text_processor = TextProcessor() 
         self.subdivisions_per_bar = subdivisions_per_bar
-        # This initial print is fine.
         # if DEBUG_FLOW_EXTRACTOR: print(f"{LOG_PREFIX_FDE} DEBUG: FlowDataExtractor initialized. Subdivisions per bar: {self.subdivisions_per_bar}", flush=True)
 
     def _estimate_syllable_details_for_word(self, word_data: WordTiming) -> List[SyllableDetail]:
@@ -113,12 +111,20 @@ class FlowDataExtractor:
 
         for i, (syl_text, stress_val) in enumerate(syllables_with_stress_info):
             syl_start = current_syllable_start_time
+            
+            # Calculate ideal end time for this syllable
+            ideal_syl_end = current_syllable_start_time + avg_syllable_duration
+            
+            # For the last syllable, ensure it ends exactly at word_end_time
             if i == num_syllables - 1: 
                 syl_end = word_end_time
             else:
-                syl_end = current_syllable_start_time + avg_syllable_duration
+                syl_end = ideal_syl_end
             
+            # Ensure syllable duration is at least min_syl_dur
             syl_end = max(syl_start + min_syl_dur, syl_end)
+            
+            # Ensure syllable does not extend beyond word_end_time
             syl_end = min(syl_end, word_end_time)
 
             syllable_details_list.append({
@@ -127,9 +133,7 @@ class FlowDataExtractor:
                 "end_time": round(syl_end, 4),
                 "stress": stress_val
             })
-            current_syllable_start_time = syl_end 
-            if current_syllable_start_time >= word_end_time and i < num_syllables -1:
-                current_syllable_start_time = word_end_time 
+            current_syllable_start_time = syl_end
         return syllable_details_list
 
     def _segment_words_into_phrases(self, 
@@ -166,8 +170,7 @@ class FlowDataExtractor:
         if current_phrase_words:
             if len(current_phrase_words) >= min_words_per_phrase:
                 phrases_of_words.append(list(current_phrase_words))
-            elif phrases_of_words: 
-                phrases_of_words[-1].extend(current_phrase_words)
+        
         if DEBUG_FLOW_EXTRACTOR: print(f"{LOG_PREFIX_FDE} DEBUG _segment_words_into_phrases: Segmented into {len(phrases_of_words)} phrases.", flush=True)
         return phrases_of_words
 
@@ -193,7 +196,7 @@ class FlowDataExtractor:
         bpm_of_bar = target_bar_info.get("bpm", 0.0)
         if bpm_of_bar <= 0: 
             if DEBUG_FLOW_EXTRACTOR: print(f"{LOG_PREFIX_FDE} DEBUG _create_flow_datum: Invalid BPM ({bpm_of_bar}) for bar {target_bar_index}. Cannot quantize syllable durations properly. Skipping datum.", flush=True)
-            return None # Crucial: need BPM for tokenizer's quantization
+            return None
         
         beats_in_target_bar = target_bar_info.get("time_signature", (4,4))[0]
         beat_duration_sec = 60.0 / bpm_of_bar
@@ -226,7 +229,6 @@ class FlowDataExtractor:
             syllable_start_subdivisions.append(subdivision_index)
 
             syl_duration_raw_sec = syl_abs_end_time - syl_abs_start_time
-            # Use tokenizer's quantization method, which takes duration in SECONDS and BPM
             quantized_dur_idx = self.tokenizer.quantize_syllable_duration_to_bin_index(
                 duration_sec=syl_duration_raw_sec, 
                 bpm=bpm_of_bar
@@ -237,10 +239,7 @@ class FlowDataExtractor:
         if DEBUG_FLOW_EXTRACTOR:
             line_text_for_debug = "".join(s['syllable_text'] for s in all_syllables_details_for_line[:10]) 
             print(f"{LOG_PREFIX_FDE} DEBUG _create_flow_datum: Bar {target_bar_index}, LineInBar {line_idx_in_bar}, SylText: '{line_text_for_debug}...' ({total_syllables_in_segment} syls)", flush=True)
-            # print(f"    Syls: {total_syllables_in_segment}, Offset: {start_offset_beats:.2f}b, Dur: {duration_beats:.2f}b", flush=True)
-            # print(f"    Subdivs: {syllable_start_subdivisions}", flush=True)
-            print(f"    QuantSylDurs_TokenizerBeats: {syllable_durations_quantized_indices}", flush=True) # Updated debug print
-            # print(f"    SylStresses: {syllable_stress_values}", flush=True)
+            print(f"    QuantSylDurs_TokenizerBeats: {syllable_durations_quantized_indices}", flush=True)
         
         return {
             "bar_index": target_bar_index, 
@@ -306,9 +305,6 @@ class FlowDataExtractor:
                     bar_absolute_start_times[bar_feat["bar_index"]] = bar_feat["bar_start_time_sec"]
                     bar_durations_map[bar_feat["bar_index"]] = bar_feat["bar_duration_sec"]
         
-        # if DEBUG_FLOW_EXTRACTOR: print(f"{LOG_PREFIX_FDE} DEBUG [{song_basename}] Bar absolute_start_times: {bar_absolute_start_times}", flush=True)
-        # if DEBUG_FLOW_EXTRACTOR: print(f"{LOG_PREFIX_FDE} DEBUG [{song_basename}] Bar durations_map: {bar_durations_map}", flush=True)
-
         bar_line_counters: Dict[int, int] = {idx: 0 for idx in bar_absolute_start_times.keys()}
 
         for phrase_idx, phrase_words in enumerate(phrases_of_words):
@@ -318,26 +314,42 @@ class FlowDataExtractor:
             current_word_idx_in_phrase = 0
             while current_word_idx_in_phrase < len(phrase_words):
                 first_word_of_segment = phrase_words[current_word_idx_in_phrase]
+                
+                # Find the bar that the first word of the segment belongs to.
+                # Prioritize bars where the word starts within or just before the bar (pickup).
                 assigned_bar_idx_for_segment = -1
                 min_offset_to_bar_start = float('inf')
 
+                # First pass: Find the bar where the word starts within or slightly before (pickup)
                 for bar_idx_cand, bar_start_abs_time_cand in bar_absolute_start_times.items():
-                    offset = first_word_of_segment["start_time"] - bar_start_abs_time_cand
-                    bar_dur_cand = bar_durations_map.get(bar_idx_cand, 2.0) 
-                    if offset >= - (bar_dur_cand / 2.0) : 
-                        if offset < min_offset_to_bar_start : 
+                    bar_dur_cand = bar_durations_map.get(bar_idx_cand, 2.0)
+                    # A word is considered "in" a bar if it starts within the bar, or up to half a bar before it (pickup)
+                    if first_word_of_segment["start_time"] >= bar_start_abs_time_cand - (bar_dur_cand / 2.0):
+                        # Among these candidates, pick the one whose start time is closest to the word's start time
+                        offset = first_word_of_segment["start_time"] - bar_start_abs_time_cand
+                        if offset < min_offset_to_bar_start:
                             min_offset_to_bar_start = offset
                             assigned_bar_idx_for_segment = bar_idx_cand
                 
-                if assigned_bar_idx_for_segment == -1: 
-                    if bar_absolute_start_times: 
-                         assigned_bar_idx_for_segment = min(bar_absolute_start_times.keys(), key=lambda k: bar_absolute_start_times[k])
-                    else: 
-                        if DEBUG_FLOW_EXTRACTOR: print(f"{LOG_PREFIX_FDE} DEBUG [{song_basename}] Phrase {phrase_idx+1} - No bars to assign to. Skipping phrase.", flush=True)
-                        break 
-                if assigned_bar_idx_for_segment == -1: 
-                    if DEBUG_FLOW_EXTRACTOR: print(f"{LOG_PREFIX_FDE} DEBUG [{song_basename}] Phrase {phrase_idx+1} - Could not assign to any bar. Skipping phrase.", flush=True)
-                    break
+                # If no bar was assigned by the primary logic (e.g., word starts much earlier than first bar, or much later than last bar)
+                if assigned_bar_idx_for_segment == -1:
+                    if not bar_absolute_start_times:
+                        if DEBUG_FLOW_EXTRACTOR: print(f"{LOG_PREFIX_FDE} DEBUG [{song_basename}] Phrase {phrase_idx+1} - No bars available. Skipping phrase.", flush=True)
+                        break # No bars at all, cannot assign.
+                    
+                    # Fallback: Find the bar that is closest in absolute time, regardless of pickup rule.
+                    closest_bar_idx = -1
+                    min_abs_diff = float('inf')
+                    for bar_idx_cand, bar_start_abs_time_cand in bar_absolute_start_times.items():
+                        abs_diff = abs(first_word_of_segment["start_time"] - bar_start_abs_time_cand)
+                        if abs_diff < min_abs_diff:
+                            min_abs_diff = abs_diff
+                            closest_bar_idx = bar_idx_cand
+                    assigned_bar_idx_for_segment = closest_bar_idx
+                    
+                    if assigned_bar_idx_for_segment == -1: # Should not happen if bar_absolute_start_times is not empty
+                        if DEBUG_FLOW_EXTRACTOR: print(f"{LOG_PREFIX_FDE} DEBUG [{song_basename}] Phrase {phrase_idx+1} - Fallback: Still could not assign to any bar. Skipping phrase.", flush=True)
+                        break
 
                 target_bar_info = next((bf for bf in song_beat_features if isinstance(bf,dict) and bf["bar_index"] == assigned_bar_idx_for_segment), None)
                 target_bar_abs_start_time = bar_absolute_start_times.get(assigned_bar_idx_for_segment)
@@ -354,6 +366,8 @@ class FlowDataExtractor:
                 
                 while temp_phrase_word_idx < len(phrase_words):
                     word_in_phrase = phrase_words[temp_phrase_word_idx]
+                    # Include the first word of the segment even if it slightly overshoots the bar end,
+                    # or if it starts within the bar.
                     if word_in_phrase["start_time"] < effective_bar_end_time or (current_word_idx_in_phrase == temp_phrase_word_idx):
                         words_for_this_bar_flow_datum.append(word_in_phrase)
                         temp_phrase_word_idx += 1
@@ -403,7 +417,6 @@ if __name__ == '__main__':
         {"bar_index": 4, "bpm": 120.0, "time_signature": (4, 4), "bar_start_time_sec": 8.0, "bar_duration_sec": 2.0, "kick_events": [], "snare_events": [], "hihat_events": [], "bass_events": []}
     ]
 
-    # Initialize FlowTokenizer for the FlowDataExtractor
     flow_tokenizer = FlowTokenizer()
     flow_extractor = FlowDataExtractor(tokenizer=flow_tokenizer, subdivisions_per_bar=16)
     print(f"\n--- Running Test with FlowDataExtractor (with Syllable Stress) ---", flush=True)

@@ -7,6 +7,7 @@ __pycache__/
 env/
 venv/
 .venv/
+*/__pycache__/
 
 
 
@@ -59,6 +60,17 @@ coverage.xml
 *.mo
 *.pot
 *.po
+*__pycache__*
+~syncthing~*
+
+acapellas/
+alignments_json/
+instrumentals/
+raw_songs_full/
+checkpoints/
+beefai_project/
+lyrics/
+.stfolder
 
 # Django stuff:
 *.log
@@ -100,17 +112,17 @@ Thumbs.db
 # Project specific
 data/*
 downloaded_songs/
-downloaded_lyrics_txt/ # If this was ever used
-downloaded_files/ # New directory for spotify downloader
+downloaded_lyrics_txt/ 
+downloaded_files/ 
 data/temp_*
 data/checkpoints/flow_model_*/runs/
-data/checkpoints/flow_model_*/runs_*/ # for tensorboard subfolders
+data/checkpoints/flow_model_*/runs_*/ 
 data/stems_cache/
 data/stems_cache_audio_sep/
-output/ # General output, keep if some outputs are desired in git, otherwise ignore specific subfolders
+output/
 # output/flow_visualizations/ # Example: if these are always transient
 # output/generated_flow_data/  # Example: if these are always transient
-*.pt # If .pt files in root or unexpected places are data not code
+*.pt 
 
 # Specific to BeefAI data structure (already covered by data/temp_* or specific paths above)
 data/*
